@@ -1,6 +1,9 @@
 name = "nastavnik-deepseek-proxy"
 main = "deepseek-proxy.js"
 compatibility_date = "2025-06-01"
+# Preview URL не нужны: клиент ходит только на продовый адрес, а лишние
+# публичные адреса — только риск. Отключаем и предупреждение при деплое.
+preview_urls = false
 
 # Секреты задаются командами:
 #   npx wrangler secret put DEEPSEEK_API_KEY

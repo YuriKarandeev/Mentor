@@ -4,11 +4,12 @@
  * Зачем: ключ DeepSeek не попадает в браузер. Клиент (PWA «Наставник»)
  * обращается к воркеру и присылает только короткий x-app-token.
  *
- * Маршруты (всё остальное — 404):
- *   GET  /health            — проверка живости воркера
- *   GET  /api/models        — список моделей
- *   GET  /api/user/balance  — баланс аккаунта
- *   POST /api/chat/completions — чат (в т.ч. stream: true), ответ прокидывается потоком
+ * Маршруты воркера (всё остальное — 404). Клиент ходит с префиксом /api,
+ * а у DeepSeek маршруты без него — префикс срезается при проксировании:
+ *   GET  /health               — проверка живости воркера (до DeepSeek не идёт)
+ *   GET  /api/models           → GET  /models
+ *   GET  /api/user/balance     → GET  /user/balance
+ *   POST /api/chat/completions → POST /chat/completions (в т.ч. stream: true, ответ идёт потоком)
  *
  * Секреты (wrangler secret put ...):
  *   DEEPSEEK_API_KEY — ключ DeepSeek (обязательно)
@@ -91,7 +92,11 @@ export default {
       return json({ error: 'На воркере не задан DEEPSEEK_API_KEY (wrangler secret put DEEPSEEK_API_KEY)' }, 500, allowOrigin);
     }
 
-    const target = `${DEEPSEEK_BASE}${path}${url.search}`;
+    // Клиент ходит в /api/*, а у DeepSeek маршруты без префикса:
+    // /models, /user/balance, /chat/completions (см. шапку файла).
+    // Без срезания /api клеился бы несуществующий https://api.deepseek.com/api/models → 404.
+    const upstreamPath = path.slice('/api'.length) || '/';
+    const target = `${DEEPSEEK_BASE}${upstreamPath}${url.search}`;
     const headers = new Headers();
     headers.set('authorization', `Bearer ${key}`);
     headers.set('accept', request.headers.get('accept') || 'application/json');

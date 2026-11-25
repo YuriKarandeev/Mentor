@@ -1,0 +1,14 @@
+{
+  "name": "nastavnik-deepseek-proxy",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Прокси к DeepSeek API для PWA «Наставник» (Cloudflare Worker)",
+  "scripts": {
+    "proxy:login": "npx -y wrangler@latest login",
+    "proxy:deploy": "npx -y wrangler@latest deploy",
+    "proxy:dev": "npx -y wrangler@latest dev",
+    "proxy:tail": "npx -y wrangler@latest tail",
+    "proxy:secret:key": "npx -y wrangler@latest secret put DEEPSEEK_API_KEY",
+    "proxy:secret:token": "npx -y wrangler@latest secret put APP_TOKEN"
+  }
+}

@@ -5,29 +5,53 @@
 
 ## Что делает
 
-| Метод | Путь | Назначение |
-| --- | --- | --- |
-| `GET` | `/health` | проверка живости воркера |
-| `GET` | `/api/models` | список моделей (кнопка «Проверить связь») |
-| `GET` | `/api/user/balance` | баланс аккаунта |
-| `POST` | `/api/chat/completions` | чат, включая `stream: true` — ответ идёт потоком |
+| Метод | Путь воркера | Путь в DeepSeek | Назначение |
+| --- | --- | --- | --- |
+| `GET` | `/health` | — | проверка живости воркера |
+| `GET` | `/api/models` | `GET /models` | список моделей (кнопка «Проверить связь») |
+| `GET` | `/api/user/balance` | `GET /user/balance` | баланс аккаунта |
+| `POST` | `/api/chat/completions` | `POST /chat/completions` | чат, включая `stream: true` — ответ идёт потоком |
 
-Остальные пути → `404`. Без корректного `x-app-token` → `401`.
+Клиент всегда ходит с префиксом `/api`, а у DeepSeek маршруты без него — префикс срезается
+перед запросом к `https://api.deepseek.com`. Остальные пути → `404`.
+Без корректного `x-app-token` → `401`.
 
 ## Развёртывание
 
 ```powershell
 cd worker
-npx wrangler login                 # один раз
-npx wrangler secret put DEEPSEEK_API_KEY
-npx wrangler secret put APP_TOKEN  # придумайте длинную случайную строку
-npx wrangler deploy
+npx.cmd -y wrangler@latest login                 # один раз
+npx.cmd -y wrangler@latest secret put DEEPSEEK_API_KEY
+npx.cmd -y wrangler@latest secret put APP_TOKEN  # придумайте длинную случайную строку
+npx.cmd -y wrangler@latest deploy
 ```
 
-`wrangler deploy` выведет адрес вида `https://nastavnik-deepseek-proxy.<account>.workers.dev` —
-его нужно вставить в приложении: **Настройки → Адрес прокси**.
+Если `npm`/`npx` без `.cmd` падают с `... cannot be loaded because running scripts is disabled`
+(ExecutionPolicy `Restricted`), используйте обёртки `npm.cmd` / `npx.cmd` — либо разово разрешите
+скрипты для текущего пользователя:
 
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+То же самое через скрипты из `worker/package.json` (не требуют установки зависимостей):
+
+```powershell
+npm.cmd run proxy:deploy     # proxy:login, proxy:dev, proxy:tail, proxy:secret:key, proxy:secret:token
+```
+
+`wrangler deploy` выводит адрес вида `https://nastavnik-deepseek-proxy.<workers-subdomain>.workers.dev`.
+**Запомните имя своего workers.dev-поддомена** — оно задаётся один раз на аккаунт и попадает в каждый
+адрес. Если при деплое wrangler спрашивает `What would you like your workers.dev subdomain to be?` —
+поддомен ещё не зарегистрирован; зарегистрировать его можно и в дашборде (`Workers & Pages` → **Your subdomain**).
+
+Этот адрес (без пути и без слэша на конце) вставляется в приложении: **Настройки → Адрес прокси**.
 Тот же `APP_TOKEN` вводится в поле **Токен приложения**. Без него воркер отвечает `401`.
+
+> Если поддомен указан неверно, браузер покажет `Failed to fetch`: имени просто нет в DNS
+> (`DNS_PROBE_FINISHED_NXDOMAIN`). Проверить можно так:
+> `curl.exe -s -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=<worker>.workers.dev&type=A"`
+> — `"Status":0` и блок `"Answer"` значат, что адрес существует.
 
 ## Ограничение источников
 
@@ -43,21 +67,26 @@ ALLOWED_ORIGINS = "https://USERNAME.github.io,http://localhost:5173"
 
 ```powershell
 cd worker
-# .dev.vars:
+# .dev.vars (в git не попадает):
 # DEEPSEEK_API_KEY=sk-...
 # APP_TOKEN=dev-token
-npx wrangler dev
+npx.cmd -y wrangler@latest dev
 ```
 
 Затем в приложении (`npm run dev`) укажите адрес прокси `http://127.0.0.1:8787`
-и токен `dev-token`.
+и токен `dev-token`. `ALLOWED_ORIGINS` уже содержит `http://localhost:5173`.
 
 ## Быстрая проверка из консоли
 
 ```powershell
-curl "https://<worker>.workers.dev/health"
-curl -H "x-app-token: <APP_TOKEN>" "https://<worker>.workers.dev/api/models"
+$w = "https://nastavnik-deepseek-proxy.<workers-subdomain>.workers.dev"
+curl.exe -i "$w/health"                                                # 200 {"ok":true,...}
+curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/models"              # 200, список моделей
+curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/user/balance"        # 200, is_available
 ```
+
+В PowerShell 5.1 `curl` — это алиас `Invoke-WebRequest`, а не настоящий curl: используйте `curl.exe`.
+Без `x-app-token` оба запроса вернут `401` — это ожидаемо и подтверждает, что защита работает.
 
 ## Замечания
 
