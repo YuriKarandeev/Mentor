@@ -1,6 +1,6 @@
 <script lang="ts">
   import Markdown from '../components/Markdown.svelte';
-  import { bookMessages, streamTurn } from '../api/agent';
+  import { bookMessages, streamTurn, webToolsSupported } from '../api/agent';
   import { ApiError } from '../api/deepseek';
   import { addNote, db, type Citation, type Note } from '../db/db';
   import { settings } from '../stores/settings.svelte';
@@ -31,6 +31,10 @@
     }
     if (!settings.data.webSearch) {
       error = 'Включите веб-поиск в «Настройках» — без него конспект будет неточным.';
+      return;
+    }
+    if (!webToolsSupported(settings.data.model)) {
+      error = 'Веб-поиск DeepSeek работает с моделью deepseek-flash — выберите её в «Настройках».';
       return;
     }
     busy = true;
@@ -102,6 +106,8 @@
       {/if}
       {#if !settings.data.webSearch}
         <span class="chip">веб-поиск выключен</span>
+      {:else if !webToolsSupported(settings.data.model)}
+        <span class="chip">веб-поиск: нужен deepseek-flash</span>
       {/if}
     </div>
     {#if error}<div class="err">{error}</div>{/if}

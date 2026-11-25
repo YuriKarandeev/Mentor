@@ -53,6 +53,24 @@ const target = `${DEEPSEEK_BASE}${upstreamPath}${url.search}`;
 Токен в поле **Токен приложения** не совпадает с секретом `APP_TOKEN` на воркере
 (либо секрет не задан — тогда воркер отвечает `500` с явным текстом).
 
+## Ошибка `400` от DeepSeek
+
+Запрос дошёл до модели, но она не приняла часть параметров. Клиент «Наставника» страхуется сам:
+при `400` он повторяет запрос **без серверных веб-инструментов** (`deepseek_web_search`,
+`deepseek_read_url`), а если это не помогло — **без режима размышлений**
+(`thinking` / `reasoning_effort`). Успешный фолбэк виден в консоли браузера как
+`[agent] ответ получен в упрощённом режиме (…)`.
+
+| Причина | Признак в тексте ошибки | Что делать |
+| --- | --- | --- |
+| веб-инструменты объявлены для модели, которая их не поддерживает | `tools`, `deepseek_web_search`, `unknown tool` | держать веб-поиск включённым только для `deepseek-flash` (клиент и сам не отправляет их другим моделям) |
+| модель не принимает `thinking` / `reasoning_effort` | `thinking`, `reasoning_effort` | фолбэк снимает их автоматически; если `400` остаётся — сменить модель на `deepseek-flash` |
+| слишком большой `max_tokens` | `max_tokens` | лимит задан в коде (`src/lib/api/agent.ts`), уменьшите значение |
+| модель вернула невалидные аргументы `save_plan` | `Структура плана не прошла проверку: …` — это **не** HTTP-ошибка, а проверка zod | ответить на уточняющие вопросы ещё раз |
+
+Если в тексте ошибки несколько фрагментов через `→`, значит не сработал ни один вариант:
+`полный запрос: … → без веб-инструментов: … → без веб-инструментов и размышлений: …`.
+
 ## PowerShell блокирует `npm` / `npx`
 
 `npm.ps1 cannot be loaded because running scripts is disabled on this system`
@@ -76,6 +94,19 @@ curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/user/balance"     # 200, is_av
 
 Preflight браузера: `curl.exe -i -X OPTIONS -H "Origin: https://yurikarandeev.github.io" <адрес>/api/models`
 должен вернуть `204` и `access-control-allow-origin`.
+
+## `git` не найден в PATH
+
+Если PowerShell отвечает `The term 'git' is not recognized`, а GitHub Desktop установлен,
+рабочий бинарник лежит внутри него:
+
+```powershell
+$git = Join-Path $env:LOCALAPPDATA 'GitHubDesktop\app-3.6.7\resources\app\git\cmd\git.exe'
+& $git status
+```
+
+Номер версии в пути меняется после обновления GitHub Desktop — подставьте актуальный
+(`Get-ChildItem "$env:LOCALAPPDATA\GitHubDesktop"`).
 
 ## Локальная отладка без деплоя
 

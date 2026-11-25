@@ -49,6 +49,8 @@ export interface ChatResponse {
   toolCalls: ToolCall[];
   annotations: Annotation[];
   usage?: Usage;
+  /** Заполняется, если запрос удался только в упрощённом виде (после HTTP 400). */
+  fallback?: string;
 }
 
 export type Effort = 'low' | 'high' | 'max';

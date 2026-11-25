@@ -1,6 +1,8 @@
 import {
+  ApiError,
   chatOnce,
   chatStream,
+  isBadRequest,
   type Connection,
   type StreamHandlers,
   type StreamResult
@@ -16,6 +18,7 @@ import {
 } from './tools';
 import type { AppSettings, Plan, Profile, Topic } from '../db/db';
 import type { ApiMessage, Usage } from './types';
+import { requestVariants, type RequestBody } from './request-variants';
 
 export function connFrom(settings: AppSettings): Connection {
   return { baseUrl: settings.proxyUrl, token: settings.appToken };
@@ -26,11 +29,57 @@ function thinkingBlock(settings: AppSettings): Record<string, unknown> {
   return { thinking: { type: 'enabled' }, reasoning_effort: settings.effort };
 }
 
-/** Серверные веб-инструменты подключаем только если включены в настройках. */
+/**
+ * Серверные веб-инструменты DeepSeek (`deepseek_web_search`, `deepseek_read_url`)
+ * по документации рассчитаны на `deepseek-flash`. Для других моделей их не отправляем,
+ * иначе запрос может быть отклонён с HTTP 400.
+ */
+const WEB_TOOL_MODELS = new Set(['deepseek-flash']);
+
+export function webToolsSupported(model: string): boolean {
+  return WEB_TOOL_MODELS.has(model.trim());
+}
+
+/** Серверные веб-инструменты подключаем, только если включены и модель их поддерживает. */
 function mergeTools(settings: AppSettings, extra: unknown[]): unknown[] {
   const tools = [...extra];
-  if (settings.webSearch) tools.push(...WEB_TOOLS);
+  if (settings.webSearch && webToolsSupported(settings.model)) tools.push(...WEB_TOOLS);
   return tools;
+}
+
+/**
+ * Выполняет запрос и при HTTP 400 повторяет его в упрощённом виде.
+ * Ретрай безопасен и для стрима: 400 приходит до первого байта ответа,
+ * поэтому обработчики не получают дублей.
+ */
+async function withFallback<T extends { fallback?: string }>(
+  body: RequestBody,
+  run: (body: RequestBody) => Promise<T>
+): Promise<T> {
+  const variants = requestVariants(body);
+  const errors: string[] = [];
+
+  for (let i = 0; i < variants.length; i += 1) {
+    const variant = variants[i];
+    try {
+      const result = await run(variant.body);
+      if (i > 0) {
+        console.warn(`[agent] ответ получен в упрощённом режиме (${variant.label}); 400 на: ${errors.join(' → ')}`);
+        result.fallback = variant.label;
+      }
+      return result;
+    } catch (e) {
+      if (!isBadRequest(e) || i === variants.length - 1) {
+        if (errors.length === 0) throw e;
+        const last = e instanceof ApiError ? e.detail : String(e);
+        throw new ApiError(400, `${errors.join(' → ')} → ${variant.label}: ${last.slice(0, 160)}`);
+      }
+      const detail = e instanceof ApiError ? e.detail : String(e);
+      errors.push(`${variant.label}: ${detail.slice(0, 160)}`);
+    }
+  }
+
+  throw new ApiError(400, errors.join(' → '));
 }
 
 export interface PlanStepResult {
@@ -59,7 +108,7 @@ export async function planStep(opts: {
     max_tokens: 4096
   };
 
-  const res = await chatOnce(connFrom(opts.settings), body, opts.signal);
+  const res = await withFallback(body, (variant) => chatOnce(connFrom(opts.settings), variant, opts.signal));
   const call = res.toolCalls.find((t) => t.function?.name === 'save_plan');
   if (!call) return { content: res.content, usage: res.usage };
 
@@ -79,15 +128,17 @@ export interface StreamTurnOptions {
 }
 
 export async function streamTurn(opts: StreamTurnOptions): Promise<StreamResult> {
+  const tools = mergeTools(opts.settings, opts.tools ?? []);
   const body: Record<string, unknown> = {
     model: opts.settings.model,
     messages: opts.messages,
     ...thinkingBlock(opts.settings),
     max_tokens: 8192
   };
-  const tools = mergeTools(opts.settings, opts.tools ?? []);
   if (tools.length > 0) body.tools = tools;
-  return chatStream(connFrom(opts.settings), body, opts.handlers ?? {}, opts.signal);
+  return withFallback(body, (variant) =>
+    chatStream(connFrom(opts.settings), variant, opts.handlers ?? {}, opts.signal)
+  );
 }
 
 export function toApiMessages(
@@ -125,7 +176,7 @@ export async function summarizeConversation(
     ...thinkingBlock(settings),
     max_tokens: 1024
   };
-  const res = await chatOnce(connFrom(settings), body, signal);
+  const res = await withFallback(body, (variant) => chatOnce(connFrom(settings), variant, signal));
   return res.content.trim();
 }
 
@@ -151,7 +202,7 @@ export async function extractProfilePatch(
     ...thinkingBlock(settings),
     tools: [UPDATE_PROFILE_TOOL]
   };
-  const res = await chatOnce(connFrom(settings), body, signal);
+  const res = await withFallback(body, (variant) => chatOnce(connFrom(settings), variant, signal));
   const call = res.toolCalls.find((t) => t.function?.name === 'update_profile');
   if (!call) return undefined;
   let json: unknown;

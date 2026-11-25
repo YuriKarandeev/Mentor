@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getBalance, listModels, ApiError } from '../api/deepseek';
+  import { webToolsSupported } from '../api/agent';
   import { db, type Effort, type Level, type ThemeMode } from '../db/db';
   import { profile } from '../stores/profile.svelte';
   import { settings } from '../stores/settings.svelte';
@@ -79,6 +80,9 @@
         bal = '';
       }
       connResult = `Связь есть. Модели: ${models.join(', ') || '—'}${bal}`;
+      if (form.webSearch && !webToolsSupported(form.model)) {
+        connResult += ` · веб-поиск доступен только для deepseek-flash, для «${form.model}» отключён`;
+      }
       connOk = true;
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
@@ -199,6 +203,14 @@
       <input type="checkbox" bind:checked={form.webSearch} />
       <span>Разрешить веб-поиск (deepseek_web_search, deepseek_read_url)</span>
     </label>
+    {#if form.webSearch && !webToolsSupported(form.model)}
+      <p class="mute tiny">
+        Для модели «{form.model}» веб-поиск отключится автоматически: серверные веб-инструменты DeepSeek
+        работают с deepseek-flash.
+      </p>
+    {:else}
+      <p class="mute tiny">Серверные веб-инструменты DeepSeek работают с моделью deepseek-flash.</p>
+    {/if}
 
     <div class="row wrap">
       <button class="btn btn-primary" onclick={saveSettings}>Сохранить</button>

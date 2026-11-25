@@ -13,6 +13,14 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Ответ API отклонён как некорректный запрос (400). Такой запрос можно
+ * безопасно повторить в упрощённом виде: ошибка приходит до первого байта ответа.
+ */
+export function isBadRequest(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 400;
+}
+
 export interface Connection {
   baseUrl: string;
   token: string;
@@ -118,6 +126,8 @@ export interface StreamResult {
   reasoning: string;
   citations: Citation[];
   usage?: Usage;
+  /** Заполняется, если запрос удался только в упрощённом виде (после HTTP 400). */
+  fallback?: string;
 }
 
 interface RawStreamChoice {
