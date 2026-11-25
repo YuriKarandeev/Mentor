@@ -10,10 +10,10 @@ compatibility_date = "2025-06-01"
 #   APP_TOKEN=...
 
 [vars]
+# Список разрешённых origin через запятую (схема + хост, БЕЗ пути).
 # Пусто = разрешены любые origin (защита только по APP_TOKEN).
-# Рекомендуется перечислить свои адреса через запятую, например:
-# ALLOWED_ORIGINS = "https://USERNAME.github.io,http://localhost:5173"
-ALLOWED_ORIGINS = ""
+# Прод: GitHub Pages, локальная разработка: Vite dev-сервер.
+ALLOWED_ORIGINS = "https://yurikarandeev.github.io,http://localhost:5173"
 
 [observability]
 enabled = true

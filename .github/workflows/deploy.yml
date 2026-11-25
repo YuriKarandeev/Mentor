@@ -18,15 +18,28 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
+
+      # Обход бага npm с платформенными optional-зависимостями (npm/cli#4828):
+      # Vite 8 работает на rolldown, которому нужен нативный бинарник под Linux.
+      # Если в package-lock.json его нет, доставляем явно — иначе падают и check, и build.
+      - name: Ensure native rolldown binding
+        run: |
+          VER=$(node -p "require('rolldown/package.json').version")
+          if [ ! -d "node_modules/@rolldown/binding-linux-x64-gnu" ]; then
+            echo "Ставлю @rolldown/binding-linux-x64-gnu@$VER"
+            npm install --no-save --no-package-lock "@rolldown/binding-linux-x64-gnu@$VER"
+          else
+            echo "Биндинг уже установлен ($VER)"
+          fi
 
       - name: Type check
         run: npm run check
@@ -38,6 +51,9 @@ jobs:
         run: npm run build
         env:
           BASE_PATH: /${{ github.event.repository.name }}/
+
+      - name: Smoke test dist
+        run: npm run smoke
 
       - name: Add .nojekyll
         run: node -e "require('fs').writeFileSync('dist/.nojekyll','')"
