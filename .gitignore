@@ -1,0 +1,18 @@
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+
+# Cloudflare worker
+worker/node_modules/
+worker/.wrangler/
+.dev.vars
+.wrangler/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,124 @@
+/**
+ * Cloudflare Worker — прокси к DeepSeek API.
+ *
+ * Зачем: ключ DeepSeek не попадает в браузер. Клиент (PWA «Наставник»)
+ * обращается к воркеру и присылает только короткий x-app-token.
+ *
+ * Маршруты (всё остальное — 404):
+ *   GET  /health            — проверка живости воркера
+ *   GET  /api/models        — список моделей
+ *   GET  /api/user/balance  — баланс аккаунта
+ *   POST /api/chat/completions — чат (в т.ч. stream: true), ответ прокидывается потоком
+ *
+ * Секреты (wrangler secret put ...):
+ *   DEEPSEEK_API_KEY — ключ DeepSeek (обязательно)
+ *   APP_TOKEN        — токен приложения, который вводится в настройках PWA (обязательно)
+ * Переменные окружения (wrangler.toml [vars]):
+ *   ALLOWED_ORIGINS  — список origin через запятую; пусто = разрешены все
+ */
+
+const DEEPSEEK_BASE = 'https://api.deepseek.com';
+const TOKEN_HEADER = 'x-app-token';
+
+function corsHeaders(allowOrigin, extra = {}) {
+  return {
+    'access-control-allow-origin': allowOrigin,
+    'access-control-allow-methods': 'GET, POST, OPTIONS',
+    'access-control-allow-headers': `content-type, ${TOKEN_HEADER}, accept`,
+    'access-control-max-age': '86400',
+    vary: 'Origin',
+    ...extra
+  };
+}
+
+function json(data, status, allowOrigin) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: corsHeaders(allowOrigin, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  });
+}
+
+/** '*' если список origin не задан, иначе — только совпавший origin. */
+function pickOrigin(request, env) {
+  const origin = request.headers.get('Origin') || '';
+  const raw = (env.ALLOWED_ORIGINS || '').trim();
+  if (!raw) return '*';
+  const allowed = raw
+    .split(',')
+    .map((s) => s.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+  if (!origin) return allowed[0] || 'null';
+  return allowed.includes(origin.replace(/\/+$/, '')) ? origin : 'null';
+}
+
+/** Сравнение без раннего выхода, чтобы не утекала длина по таймингам. */
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
+    const allowOrigin = pickOrigin(request, env);
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders(allowOrigin) });
+    }
+
+    if (path === '/' || path === '/health') {
+      return json({ ok: true, service: 'nastavnik-deepseek-proxy' }, 200, allowOrigin);
+    }
+
+    if (!path.startsWith('/api/')) {
+      return json({ error: 'Не найдено. Доступны /health и /api/*' }, 404, allowOrigin);
+    }
+
+    const expected = (env.APP_TOKEN || '').trim();
+    if (!expected) {
+      return json({ error: 'На воркере не задан APP_TOKEN (wrangler secret put APP_TOKEN)' }, 500, allowOrigin);
+    }
+    const provided = (request.headers.get(TOKEN_HEADER) || '').trim();
+    if (!safeEqual(provided, expected)) {
+      return json({ error: 'Неверный или отсутствующий x-app-token' }, 401, allowOrigin);
+    }
+
+    const key = (env.DEEPSEEK_API_KEY || '').trim();
+    if (!key) {
+      return json({ error: 'На воркере не задан DEEPSEEK_API_KEY (wrangler secret put DEEPSEEK_API_KEY)' }, 500, allowOrigin);
+    }
+
+    const target = `${DEEPSEEK_BASE}${path}${url.search}`;
+    const headers = new Headers();
+    headers.set('authorization', `Bearer ${key}`);
+    headers.set('accept', request.headers.get('accept') || 'application/json');
+    const contentType = request.headers.get('content-type');
+    if (contentType) headers.set('content-type', contentType);
+
+    /** @type {RequestInit} */
+    const init = { method: request.method, headers };
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      init.body = await request.text();
+    }
+
+    let upstream;
+    try {
+      upstream = await fetch(target, init);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return json({ error: `Не удалось связаться с DeepSeek: ${message}` }, 502, allowOrigin);
+    }
+
+    const resHeaders = corsHeaders(allowOrigin, {
+      'content-type': upstream.headers.get('content-type') || 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      // отключает буферизацию у промежуточных прокси — стрим идёт сразу
+      'x-accel-buffering': 'no'
+    });
+
+    return new Response(upstream.body, { status: upstream.status, headers: resHeaders });
+  }
+};

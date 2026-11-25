@@ -1,0 +1,63 @@
+/**
+ * Быстрая проверка собранного dist/ без запуска сервера.
+ * Запуск: npm run smoke (после npm run build)
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+
+const dist = path.resolve('dist');
+const failures = [];
+
+const check = (ok, message) => {
+  if (!ok) failures.push(message);
+  console.log(`${ok ? 'OK  ' : 'FAIL'} ${message}`);
+};
+
+if (!fs.existsSync(dist)) {
+  console.error('dist/ отсутствует — сначала выполните npm run build');
+  process.exit(1);
+}
+
+const indexHtml = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
+check(indexHtml.includes('manifest.webmanifest'), 'index.html ссылается на манифест');
+check(indexHtml.includes('registerSW.js'), 'index.html подключает service worker');
+check(/<div id="app">/.test(indexHtml), 'index.html содержит точку монтирования #app');
+
+const assetsDir = path.join(dist, 'assets');
+const assets = fs.existsSync(assetsDir) ? fs.readdirSync(assetsDir) : [];
+const jsFiles = assets.filter((f) => f.endsWith('.js'));
+const cssFiles = assets.filter((f) => f.endsWith('.css'));
+check(jsFiles.length > 0, 'собран JS-бандл');
+check(cssFiles.length > 0, 'собран CSS-бандл');
+
+const js = jsFiles.map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8')).join('\n');
+check(js.includes('Наставник'), 'в бандле есть строки интерфейса');
+check(js.includes('deepseek'), 'в бандле есть клиент DeepSeek');
+
+const manifest = JSON.parse(fs.readFileSync(path.join(dist, 'manifest.webmanifest'), 'utf8'));
+check(Array.isArray(manifest.icons) && manifest.icons.length >= 3, 'манифест описывает иконки');
+check(manifest.display === 'standalone', 'манифест: display=standalone');
+
+const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+for (const icon of manifest.icons) {
+  const p = path.join(dist, icon.src);
+  const exists = fs.existsSync(p);
+  check(exists, `файл иконки на месте: ${icon.src}`);
+  if (exists) {
+    const head = fs.readFileSync(p).subarray(0, 4);
+    check(head.equals(pngSignature), `иконка является PNG: ${icon.src}`);
+  }
+}
+
+const swPath = path.join(dist, 'sw.js');
+check(fs.existsSync(swPath), 'сгенерирован service worker');
+if (fs.existsSync(swPath)) {
+  const sw = fs.readFileSync(swPath, 'utf8');
+  check(sw.includes('precache'), 'service worker содержит precache');
+}
+
+if (failures.length > 0) {
+  console.error(`\nПровалено проверок: ${failures.length}`);
+  process.exit(1);
+}
+console.log('\nВсе проверки пройдены.');

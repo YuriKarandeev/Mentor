@@ -1,0 +1,264 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import Toasts from './lib/components/Toasts.svelte';
+  import LibraryPage from './lib/pages/LibraryPage.svelte';
+  import NewTopicPage from './lib/pages/NewTopicPage.svelte';
+  import SettingsPage from './lib/pages/SettingsPage.svelte';
+  import TopicPage from './lib/pages/TopicPage.svelte';
+  import TopicsPage from './lib/pages/TopicsPage.svelte';
+  import { router } from './lib/router.svelte';
+  import { profile } from './lib/stores/profile.svelte';
+  import { settings } from './lib/stores/settings.svelte';
+  import { applyTheme, watchSystemTheme } from './lib/theme';
+
+  let booted = $state(false);
+
+  const NAV = [
+    { path: '/', key: 'topics', label: 'Темы', icon: '📚' },
+    { path: '/new', key: 'new-topic', label: 'Новая', icon: '＋' },
+    { path: '/library', key: 'library', label: 'Библиотека', icon: '📖' },
+    { path: '/settings', key: 'settings', label: 'Настройки', icon: '⚙️' }
+  ];
+
+  onMount(() => {
+    void (async () => {
+      await Promise.all([settings.load(), profile.load()]);
+      applyTheme(settings.data.theme);
+      booted = true;
+      if (!settings.configured && router.route.name !== 'settings') {
+        router.go('/settings');
+      }
+    })();
+  });
+
+  $effect(() => {
+    applyTheme(settings.data.theme);
+  });
+
+  $effect(() => {
+    const mode = settings.data.theme;
+    if (!booted) return;
+    return watchSystemTheme(mode, () => applyTheme(mode));
+  });
+
+  const route = $derived(router.route);
+  const current = $derived(route.name === 'topic' ? 'topics' : route.name);
+  const topicId = $derived(route.name === 'topic' ? route.id : '');
+  const topicTab = $derived(route.name === 'topic' ? route.tab : 'plan');
+</script>
+
+{#if !booted}
+  <div class="boot">Загрузка…</div>
+{:else}
+  <div class="shell">
+    <aside class="side">
+      <div class="brand">
+        <span class="mark">Н</span>
+        <div>
+          <strong>Наставник</strong>
+          <div class="tiny mute">ИИ-репетитор</div>
+        </div>
+      </div>
+
+      <nav>
+        {#each NAV as item (item.path)}
+          <button class:active={current === item.key} onclick={() => router.go(item.path)}>
+            <span class="ico">{item.icon}</span>
+            <span>{item.label}</span>
+          </button>
+        {/each}
+      </nav>
+
+      <div class="side-foot tiny mute">Данные хранятся только на этом устройстве</div>
+    </aside>
+
+    <main>
+      {#if !settings.configured && route.name !== 'settings'}
+        <div class="setup">
+          Остался один шаг: укажите адрес прокси и токен.
+          <button class="btn btn-sm btn-primary" onclick={() => router.go('/settings')}>Настроить</button>
+        </div>
+      {/if}
+
+      {#if route.name === 'topics'}
+        <TopicsPage />
+      {:else if route.name === 'new-topic'}
+        <NewTopicPage />
+      {:else if route.name === 'library'}
+        <LibraryPage />
+      {:else if route.name === 'settings'}
+        <SettingsPage />
+      {:else}
+        {#key topicId}
+          <TopicPage id={topicId} tab={topicTab} />
+        {/key}
+      {/if}
+    </main>
+
+    <nav class="bottom">
+      {#each NAV as item (item.path)}
+        <button class:active={current === item.key} onclick={() => router.go(item.path)}>
+          <span class="ico">{item.icon}</span>
+          <span class="lbl">{item.label}</span>
+        </button>
+      {/each}
+    </nav>
+  </div>
+{/if}
+
+<Toasts />
+
+<style>
+  .boot {
+    display: grid;
+    place-items: center;
+    min-height: 100vh;
+    color: var(--text-mute);
+  }
+
+  .shell {
+    display: flex;
+    min-height: 100vh;
+  }
+
+  main {
+    flex: 1;
+    min-width: 0;
+    padding: 16px 14px calc(var(--nav-h) + 24px);
+  }
+
+  /* --- мобильная навигация --- */
+  .bottom {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--nav-h) + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    display: flex;
+    background: var(--bg-elev);
+    border-top: 1px solid var(--border-soft);
+    z-index: 50;
+  }
+
+  .bottom button {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    background: none;
+    border: none;
+    color: var(--text-mute);
+    font-size: 0.68rem;
+    padding: 6px 0;
+  }
+
+  .bottom button.active {
+    color: var(--accent);
+  }
+
+  .bottom .ico {
+    font-size: 1.1rem;
+    line-height: 1;
+  }
+
+  .lbl {
+    font-weight: 550;
+  }
+
+  .side {
+    display: none;
+  }
+
+  .side nav {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .side nav button {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    background: none;
+    border: none;
+    padding: 10px 12px;
+    border-radius: var(--radius-s);
+    color: var(--text-dim);
+    text-align: left;
+    font-weight: 550;
+  }
+
+  .side nav button:hover {
+    background: var(--bg-elev-2);
+  }
+
+  .side nav button.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  .brand {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 0 6px;
+  }
+
+  .mark {
+    width: 36px;
+    height: 36px;
+    border-radius: 12px;
+    background: var(--accent);
+    color: #fff;
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    flex: 0 0 auto;
+  }
+
+  .side-foot {
+    margin-top: auto;
+    padding: 0 6px;
+  }
+
+  .setup {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: var(--radius-s);
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+  }
+
+  @media (min-width: 900px) {
+    .side {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      width: 250px;
+      flex: 0 0 250px;
+      padding: 20px 14px;
+      border-right: 1px solid var(--border-soft);
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      background: var(--bg-elev);
+    }
+
+    main {
+      padding: 28px 32px 48px;
+    }
+
+    .bottom {
+      display: none;
+    }
+  }
+</style>
+

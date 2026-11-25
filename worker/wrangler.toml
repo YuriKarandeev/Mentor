@@ -1,0 +1,19 @@
+name = "nastavnik-deepseek-proxy"
+main = "deepseek-proxy.js"
+compatibility_date = "2025-06-01"
+
+# Секреты задаются командами:
+#   npx wrangler secret put DEEPSEEK_API_KEY
+#   npx wrangler secret put APP_TOKEN
+# Для локальной отладки (npx wrangler dev) создайте файл .dev.vars:
+#   DEEPSEEK_API_KEY=sk-...
+#   APP_TOKEN=...
+
+[vars]
+# Пусто = разрешены любые origin (защита только по APP_TOKEN).
+# Рекомендуется перечислить свои адреса через запятую, например:
+# ALLOWED_ORIGINS = "https://USERNAME.github.io,http://localhost:5173"
+ALLOWED_ORIGINS = ""
+
+[observability]
+enabled = true
