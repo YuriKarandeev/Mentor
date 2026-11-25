@@ -12,6 +12,22 @@
 4. В приложении: **Настройки → Адрес прокси** = этот адрес, **Токен приложения** = `APP_TOKEN`,
    **Модель** = `deepseek-flash` или `deepseek-v4-pro`.
 5. **Проверить связь** → зелёный отчёт → **Сохранить**.
+## Синхронизация и Firebase
+
+Синхронизация — отдельный, необязательный слой: без входа приложение работает как локальное.
+Если вход через Google не работает или в облаке не появляются данные:
+
+| Симптом в приложении | Причина | Что делать |
+| --- | --- | --- |
+| `auth/configuration-not-found` | Firebase Authentication не инициализирован | Authentication → **Get started**, затем включить провайдер Google |
+| `auth/operation-not-allowed` | провайдер Google выключен | Authentication → Sign-in method → Google → **Enable** |
+| `auth/unauthorized-domain` | домен не в списке разрешённых | Authentication → Settings → **Authorized domains** → добавить `yurikarandeev.github.io` и `localhost` |
+| `permission-denied` при синхронизации | не опубликованы правила Firestore | Firestore → Rules → вставить [`../firestore.rules`](../firestore.rules) → Publish |
+| «Ошибка синхронизации» без кода | нет сети или истёк вход | проверить сеть; выйти из аккаунта и войти снова |
+| Данные есть на одном устройстве и нет на другом | синхронизация ещё не сработала | нажать «Синхронизировать сейчас» или вернуться на вкладку |
+
+Полное описание схемы, алгоритма и квот — в [`SYNC.md`](SYNC.md).
+
 
 ## Ошибка «Failed to fetch»
 
