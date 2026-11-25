@@ -14,10 +14,12 @@
     addMessage,
     addNote,
     db,
-    getKv,
+    getMemory,
     getPlan,
     planProgress,
-    setKv,
+    removeNote as deleteNote,
+    removeTopic as deleteTopic,
+    setMemory,
     togglePlanItem,
     type Citation,
     type Note,
@@ -29,8 +31,10 @@
   import { profile } from '../stores/profile.svelte';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
+  import { sync } from '../sync/state.svelte';
   import { formatDate } from '../utils/format';
   import { plainText } from '../utils/markdown';
+  import { untrack } from 'svelte';
 
   let { id, tab }: { id: string; tab: TopicTab } = $props();
 
@@ -53,6 +57,10 @@
 
   $effect(() => {
     const topicId = id;
+    // Перечитываем данные, когда синхронизация принесла чужие изменения,
+    // но не во время стриминга ответа, чтобы не сбить генерацию.
+    const revision = sync.revision;
+    if (revision > 0 && untrack(() => streaming)) return;
     void loadAll(topicId);
   });
 
@@ -68,7 +76,7 @@
     messages = await db.messages.where('topicId').equals(topicId).sortBy('createdAt');
     const rawNotes = await db.notes.where('topicId').equals(topicId).toArray();
     notes = rawNotes.sort((a, b) => b.createdAt - a.createdAt);
-    memory = await getKv<string>(`memory:${topicId}`, '');
+    memory = await getMemory(topicId);
     loading = false;
   }
 
@@ -156,7 +164,7 @@
       if (messages.length >= 18) {
         const summary = await summarizeConversation(settings.data, t, transcript);
         if (summary) {
-          await setKv(`memory:${t.id}`, summary);
+          await setMemory(t.id, summary);
           memory = summary;
         }
       }
@@ -207,20 +215,14 @@
   }
 
   async function removeNote(note: Note): Promise<void> {
-    await db.notes.delete(note.id);
+    await deleteNote(note.id);
     notes = notes.filter((n) => n.id !== note.id);
   }
 
   async function removeTopic(): Promise<void> {
     if (!topic) return;
     if (!confirm(`Удалить тему «${topic.title}» вместе с планом, чатом и конспектами?`)) return;
-    const topicId = topic.id;
-    await db.transaction('rw', db.topics, db.plans, db.messages, db.notes, async () => {
-      await db.topics.delete(topicId);
-      await db.plans.where('topicId').equals(topicId).delete();
-      await db.messages.where('topicId').equals(topicId).delete();
-      await db.notes.where('topicId').equals(topicId).delete();
-    });
+    await deleteTopic(topic.id);
     router.go('/');
   }
 </script>

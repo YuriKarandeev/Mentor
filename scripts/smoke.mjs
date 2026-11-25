@@ -33,6 +33,14 @@ check(cssFiles.length > 0, 'собран CSS-бандл');
 const js = jsFiles.map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8')).join('\n');
 check(js.includes('Наставник'), 'в бандле есть строки интерфейса');
 check(js.includes('deepseek'), 'в бандле есть клиент DeepSeek');
+check(js.includes('Синхронизация'), 'в бандле есть раздел синхронизации');
+
+const firebaseFiles = jsFiles.filter((f) =>
+  fs.readFileSync(path.join(assetsDir, f), 'utf8').includes('firestore.googleapis.com')
+);
+check(firebaseFiles.length > 0, 'Firebase собран отдельным чанком');
+const firebaseJs = firebaseFiles.map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8')).join('\n');
+check(!firebaseJs.includes('appToken'), 'в чанках Firebase нет токена приложения');
 
 const manifest = JSON.parse(fs.readFileSync(path.join(dist, 'manifest.webmanifest'), 'utf8'));
 check(Array.isArray(manifest.icons) && manifest.icons.length >= 3, 'манифест описывает иконки');

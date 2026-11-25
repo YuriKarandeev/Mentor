@@ -46,7 +46,8 @@
       hoursPerWeek: hours,
       status: 'active',
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      dirty: 1
     };
     stage = 'dialog';
     const intro = `Хочу освоить: ${draft.title}. Цель: ${draft.goal || 'пока не сформулирована'}. Уровень: ${level}. Могу уделять ${hours} ч в неделю.`;

@@ -9,11 +9,13 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "smoke": "node scripts/smoke.mjs",
-    "icons": "node scripts/gen-icons.mjs"
+    "icons": "node scripts/gen-icons.mjs",
+    "test:sync": "node scripts/test-sync.mjs"
   },
   "dependencies": {
     "dexie": "^4.4.7",
     "dompurify": "^3.5.0",
+    "firebase": "^13.4.0",
     "marked": "^18.3.0",
     "zod": "^4.6.7"
   },

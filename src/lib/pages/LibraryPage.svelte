@@ -2,9 +2,10 @@
   import Markdown from '../components/Markdown.svelte';
   import { bookMessages, streamTurn, webToolsSupported } from '../api/agent';
   import { ApiError } from '../api/deepseek';
-  import { addNote, db, type Citation, type Note } from '../db/db';
+  import { addNote, db, removeNote as deleteNote, type Citation, type Note } from '../db/db';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
+  import { sync } from '../sync/state.svelte';
   import { formatDate } from '../utils/format';
 
   let query = $state('');
@@ -20,7 +21,10 @@
     notes = all.filter((n) => n.source === 'book').sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  load();
+  $effect(() => {
+    sync.revision;
+    void load();
+  });
 
   async function generate(): Promise<void> {
     const q = query.trim();
@@ -81,7 +85,7 @@
   }
 
   async function remove(id: string): Promise<void> {
-    await db.notes.delete(id);
+    await deleteNote(id);
     notes = notes.filter((n) => n.id !== id);
   }
 </script>

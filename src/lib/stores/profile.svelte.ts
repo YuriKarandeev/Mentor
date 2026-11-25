@@ -14,7 +14,7 @@ class ProfileStore {
 
   async save(patch: Partial<Profile>): Promise<void> {
     this.data = { ...this.data, ...patch, updatedAt: Date.now() };
-    await setKv(KEY, this.data);
+    await setKv(KEY, this.data, { sync: true });
   }
 
   /** Слияние патча от модели: цели/интересы объединяем без дублей. */

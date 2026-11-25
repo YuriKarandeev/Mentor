@@ -1,6 +1,7 @@
 <script lang="ts">
   import { db, planProgress, type Plan, type Topic } from '../db/db';
   import { router } from '../router.svelte';
+  import { sync } from '../sync/state.svelte';
   import { relativeTime } from '../utils/format';
 
   let topics = $state<Topic[]>([]);
@@ -16,7 +17,11 @@
     loading = false;
   }
 
-  load();
+  $effect(() => {
+    // revision меняется, когда синхронизация принесла чужие изменения.
+    sync.revision;
+    void load();
+  });
 
   const active = $derived(topics.filter((t) => t.status === 'active'));
   const avg = $derived(

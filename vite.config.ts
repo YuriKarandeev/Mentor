@@ -36,6 +36,9 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,png,svg,woff2}'],
+        // Firebase SDK (~500 КБ) грузится по требованию — не кладём его в precache,
+        // чтобы установка PWA не тянула его тем, кто не включает синхронизацию.
+        globIgnores: ['**/assets/index.esm-*.js'],
         navigateFallback: 'index.html',
         cleanupOutdatedCaches: true,
         // запросы к воркеру-прокси и DeepSeek никогда не кешируем

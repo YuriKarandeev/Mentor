@@ -9,6 +9,7 @@
   import { router } from './lib/router.svelte';
   import { profile } from './lib/stores/profile.svelte';
   import { settings } from './lib/stores/settings.svelte';
+  import { sync } from './lib/sync/state.svelte';
   import { applyTheme, watchSystemTheme } from './lib/theme';
 
   let booted = $state(false);
@@ -28,11 +29,21 @@
       if (!settings.configured && router.route.name !== 'settings') {
         router.go('/settings');
       }
+      // Firebase тянется отдельным чанком и только при включённой синхронизации.
+      const { initSync } = await import('./lib/sync/engine');
+      void initSync();
     })();
   });
 
   $effect(() => {
     applyTheme(settings.data.theme);
+  });
+
+  $effect(() => {
+    // Синхронизация могла принести новый профиль с другого устройства.
+    sync.revision;
+    if (!booted) return;
+    void profile.load();
   });
 
   $effect(() => {
@@ -69,7 +80,15 @@
         {/each}
       </nav>
 
-      <div class="side-foot tiny mute">Данные хранятся только на этом устройстве</div>
+      <div class="side-foot tiny mute">
+        {#if sync.user}
+          Данные синхронизируются с облаком
+        {:else if sync.available}
+          Локальные данные — вход в «Настройках»
+        {:else}
+          Данные хранятся только на этом устройстве
+        {/if}
+      </div>
     </aside>
 
     <main>

@@ -1,10 +1,12 @@
 <script lang="ts">
   import { getBalance, listModels, ApiError } from '../api/deepseek';
   import { webToolsSupported } from '../api/agent';
-  import { db, type Effort, type Level, type ThemeMode } from '../db/db';
+  import { db, wipeAll, type Effort, type Level, type ThemeMode } from '../db/db';
   import { profile } from '../stores/profile.svelte';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
+  import { sync } from '../sync/state.svelte';
+  import { formatDate } from '../utils/format';
 
   const MODELS = ['deepseek-flash', 'deepseek-v4-pro'];
   const EFFORTS: Effort[] = ['low', 'high', 'max'];
@@ -36,6 +38,112 @@
   let checking = $state(false);
   let connResult = $state('');
   let connOk = $state(false);
+
+  let syncBusy = $state(false);
+  let syncMessage = $state('');
+  let syncFailed = $state(false);
+
+  const loadEngine = () => import('../sync/engine');
+
+  function syncErrorText(e: unknown): string {
+    const code = (e as { code?: string }).code ?? '';
+    switch (code) {
+      case 'auth/unauthorized-domain':
+        return 'Этот домен не разрешён: добавьте его в Firebase Authentication → Authorized domains.';
+      case 'auth/operation-not-allowed':
+        return 'Вход через Google выключен: включите провайдер Google в консоли Firebase.';
+      case 'auth/configuration-not-found':
+        return 'Firebase Authentication не настроен для проекта.';
+      case 'auth/popup-closed-by-user':
+        return 'Окно входа закрыто до завершения.';
+      case 'permission-denied':
+        return 'Firestore отклонил запрос: опубликуйте правила из firestore.rules.';
+      default:
+        return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function signIn(): Promise<void> {
+    syncBusy = true;
+    syncMessage = '';
+    syncFailed = false;
+    try {
+      const { signInWithGoogle } = await loadEngine();
+      await signInWithGoogle();
+    } catch (e) {
+      syncFailed = true;
+      syncMessage = syncErrorText(e);
+    } finally {
+      syncBusy = false;
+    }
+  }
+
+  async function signOut(): Promise<void> {
+    syncBusy = true;
+    syncMessage = '';
+    syncFailed = false;
+    try {
+      const { signOutSync } = await loadEngine();
+      await signOutSync();
+      syncMessage = 'Вы вышли из аккаунта. Данные остались на устройстве.';
+    } catch (e) {
+      syncFailed = true;
+      syncMessage = syncErrorText(e);
+    } finally {
+      syncBusy = false;
+    }
+  }
+
+  async function runSync(): Promise<void> {
+    syncBusy = true;
+    syncFailed = false;
+    syncMessage = '';
+    try {
+      const { syncNow } = await loadEngine();
+      await syncNow();
+      if (sync.error) {
+        syncFailed = true;
+        syncMessage = sync.error;
+      } else {
+        syncMessage = sync.pending > 0 ? `Осталось отправить: ${sync.pending}` : 'Готово, всё синхронизировано.';
+      }
+    } catch (e) {
+      syncFailed = true;
+      syncMessage = syncErrorText(e);
+    } finally {
+      syncBusy = false;
+    }
+  }
+
+  async function toggleAuto(e: Event): Promise<void> {
+    const value = (e.currentTarget as HTMLInputElement).checked;
+    const { setAutoSync } = await loadEngine();
+    await setAutoSync(value);
+  }
+
+  async function wipeCloudData(): Promise<void> {
+    if (
+      !confirm(
+        'Удалить копию данных из облака? На этом устройстве всё останется, но другие устройства потеряют данные.'
+      )
+    ) {
+      return;
+    }
+    syncBusy = true;
+    syncFailed = false;
+    syncMessage = '';
+    try {
+      const { wipeCloud } = await loadEngine();
+      await wipeCloud();
+      syncFailed = Boolean(sync.error);
+      syncMessage = sync.error || 'Облачная копия очищена.';
+    } catch (e) {
+      syncFailed = true;
+      syncMessage = syncErrorText(e);
+    } finally {
+      syncBusy = false;
+    }
+  }
 
   $effect(() => {
     if (!settings.loaded || hydrated) return;
@@ -113,12 +221,13 @@
 
   async function exportData(): Promise<void> {
     const payload = {
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       topics: await db.topics.toArray(),
       plans: await db.plans.toArray(),
       messages: await db.messages.toArray(),
       notes: await db.notes.toArray(),
+      memory: await db.memory.toArray(),
       kv: await db.kv.toArray()
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -130,19 +239,41 @@
     URL.revokeObjectURL(url);
   }
 
+  /** Импорт: записи помечаются к отправке, чтобы при синхронизации уйти в облако. */
+  function normalizeRows(rows: unknown[]): never[] {
+    return rows.map((raw) => {
+      const row = raw as Record<string, unknown>;
+      return {
+        ...row,
+        updatedAt: Number(row.updatedAt ?? row.createdAt ?? Date.now()) || Date.now(),
+        dirty: 1
+      } as never;
+    });
+  }
+
   async function importData(e: Event): Promise<void> {
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
     try {
       const json = JSON.parse(await file.text()) as Record<string, unknown[]>;
-      await db.transaction('rw', db.topics, db.plans, db.messages, db.notes, db.kv, async () => {
-        if (Array.isArray(json.topics)) await db.topics.bulkPut(json.topics as never[]);
-        if (Array.isArray(json.plans)) await db.plans.bulkPut(json.plans as never[]);
-        if (Array.isArray(json.messages)) await db.messages.bulkPut(json.messages as never[]);
-        if (Array.isArray(json.notes)) await db.notes.bulkPut(json.notes as never[]);
-        if (Array.isArray(json.kv)) await db.kv.bulkPut(json.kv as never[]);
-      });
+      await db.transaction(
+        'rw',
+        [db.topics, db.plans, db.messages, db.notes, db.memory, db.kv],
+        async () => {
+          if (Array.isArray(json.topics)) await db.topics.bulkPut(normalizeRows(json.topics));
+          if (Array.isArray(json.plans)) await db.plans.bulkPut(normalizeRows(json.plans));
+          if (Array.isArray(json.messages)) await db.messages.bulkPut(normalizeRows(json.messages));
+          if (Array.isArray(json.notes)) await db.notes.bulkPut(normalizeRows(json.notes));
+          if (Array.isArray(json.memory)) await db.memory.bulkPut(json.memory as never[]);
+          if (Array.isArray(json.kv)) {
+            const rows = (json.kv as Array<Record<string, unknown>>).map((row) =>
+              row.key === 'profile' ? { ...row, dirty: 1 } : row
+            );
+            await db.kv.bulkPut(rows as never[]);
+          }
+        }
+      );
       toasts.success('Данные импортированы. Обновите страницу.');
     } catch {
       toasts.error('Не удалось прочитать файл резервной копии');
@@ -152,8 +283,9 @@
   }
 
   async function wipe(): Promise<void> {
-    if (!confirm('Удалить ВСЕ данные приложения на этом устройстве? Отменить будет нельзя.')) return;
-    await db.delete();
+    const extra = sync.user ? ' Данные будут удалены и из облака.' : '';
+    if (!confirm(`Удалить ВСЕ данные приложения на этом устройстве? Отменить будет нельзя.${extra}`)) return;
+    await wipeAll();
     location.hash = '/';
     location.reload();
   }
@@ -245,7 +377,7 @@
   <section class="card col">
     <h2>Профиль и память</h2>
     <p class="mute tiny">
-      Наставник использует это в каждом диалоге. Данные хранятся только на устройстве.
+      Наставник использует это в каждом диалоге. Без входа в аккаунт данные хранятся только на устройстве.
     </p>
 
     <div class="row wrap">
@@ -288,6 +420,63 @@
   </section>
 
   <section class="card col">
+    <h2>Синхронизация</h2>
+
+    {#if !sync.available}
+      <p class="mute tiny">
+        В этой сборке синхронизация выключена: приложение работает только с локальной базой.
+      </p>
+    {:else if sync.user}
+      <div class="row-between wrap">
+        <div>
+          <strong>{sync.user.name || sync.user.email || 'Аккаунт Google'}</strong>
+          <div class="mute tiny">{sync.user.email}</div>
+        </div>
+        <span class="chip">{sync.statusLabel}</span>
+      </div>
+
+      {#if sync.pending > 0}
+        <p class="mute tiny">Ждут отправки: {sync.pending}</p>
+      {:else if sync.lastSyncAt > 0}
+        <p class="mute tiny">Последняя синхронизация: {formatDate(sync.lastSyncAt)}</p>
+      {/if}
+      {#if sync.error}<div class="err">{sync.error}</div>{/if}
+
+      <label class="switch">
+        <input type="checkbox" checked={sync.auto} onchange={toggleAuto} />
+        <span>Синхронизировать автоматически, пока приложение открыто</span>
+      </label>
+
+      <div class="row wrap">
+        <button class="btn btn-primary btn-sm" onclick={runSync} disabled={syncBusy}>
+          {syncBusy ? 'Синхронизирую…' : 'Синхронизировать сейчас'}
+        </button>
+        <button class="btn btn-sm" onclick={signOut} disabled={syncBusy}>Выйти из аккаунта</button>
+        <button class="btn btn-sm btn-danger" onclick={wipeCloudData} disabled={syncBusy}>
+          Удалить из облака
+        </button>
+      </div>
+
+      {#if syncMessage}<div class={syncFailed ? 'err' : 'ok'}>{syncMessage}</div>{/if}
+
+      <p class="mute tiny">
+        В облако уходят темы, планы, чаты, конспекты, память и профиль. Токен прокси и настройки устройства
+        остаются только здесь. Конфликты решаются по времени изменения — при правке одного пункта на двух
+        устройствах останется последняя версия.
+      </p>
+    {:else}
+      <p class="mute tiny">
+        Войдите через Google, чтобы продолжить занятия на другом устройстве. Без входа всё работает как
+        раньше — данные хранятся только здесь.
+      </p>
+      <button class="btn btn-primary" onclick={signIn} disabled={syncBusy}>
+        {syncBusy ? 'Открываю Google…' : 'Войти через Google'}
+      </button>
+      {#if syncMessage}<div class={syncFailed ? 'err' : 'ok'}>{syncMessage}</div>{/if}
+    {/if}
+  </section>
+
+  <section class="card col">
     <h2>Данные</h2>
     <div class="row wrap">
       <button class="btn btn-sm" onclick={exportData}>Экспорт в JSON</button>
@@ -298,7 +487,8 @@
       <button class="btn btn-sm btn-danger" onclick={wipe}>Удалить всё</button>
     </div>
     <p class="mute tiny">
-      Приложение полностью локальное: темы, планы, чаты и конспекты лежат в IndexedDB браузера.
+      Темы, планы, чаты и конспекты лежат в IndexedDB браузера. С включённой синхронизацией копия
+      хранится в вашем аккаунте Firebase и подтягивается на другие устройства.
     </p>
   </section>
 </div>
