@@ -50,9 +50,22 @@ npm run preview    # локальный просмотр сборки
 
 ## Публикация на GitHub Pages
 
-Workflow `.github/workflows/deploy.yml` собирает проект и публикует `dist` при пуше в `main`.
+Живой адрес: **https://yurikarandeev.github.io/Mentor/**
+
+Workflow `.github/workflows/deploy.yml` собирает проект и публикует `dist` при пуше в `main`
+(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → иконки → `npm run build` → `npm run smoke`).
 `BASE_PATH` подставляется автоматически: `/<repo>/`. Роутинг — hash-based, поэтому deep links
 работают без серверных rewrite-правил.
+
+> **Важно про `package-lock.json`.** Vite 8 работает на rolldown с нативными бинарниками под каждую ОС.
+> В npm есть баг ([npm/cli#4828](https://github.com/npm/cli/issues/4828)): lock, созданный на одной платформе,
+> может не содержать optional-зависимостей для другой, и тогда CI на Ubuntu падает с
+> `Cannot find native binding`. Поэтому lock в репозитории содержит все платформы
+> (`@rolldown/binding-*`, `lightningcss-*`) — не удаляйте эти записи и не правьте lock вручную.
+> Если нужно пересобрать lock: удалите `node_modules` и `package-lock.json`, выполните `npm install`,
+> затем проверьте, что `grep "binding-linux-x64-gnu" package-lock.json` что-то находит.
+> Дополнительная страховка в CI: шаг `Ensure native rolldown binding` доставляет биндинг под Linux,
+> если его вдруг не окажется.
 
 Для сборки под свой домен:
 
