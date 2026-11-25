@@ -22,6 +22,10 @@ class SyncStore {
   pending = $state(0);
   lastSyncAt = $state(0);
   error = $state('');
+  /** Подсказка «что делать» к текущей ошибке. */
+  errorHint = $state('');
+  /** Код ошибки Firebase (`permission-denied`, …) для адресных подсказок в UI. */
+  errorCode = $state('');
   revision = $state(0);
 
   get signedIn(): boolean {

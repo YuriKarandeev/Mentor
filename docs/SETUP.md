@@ -19,12 +19,32 @@
 
 | Симптом в приложении | Причина | Что делать |
 | --- | --- | --- |
-| `auth/configuration-not-found` | Firebase Authentication не инициализирован | Authentication → **Get started**, затем включить провайдер Google |
-| `auth/operation-not-allowed` | провайдер Google выключен | Authentication → Sign-in method → Google → **Enable** |
-| `auth/unauthorized-domain` | домен не в списке разрешённых | Authentication → Settings → **Authorized domains** → добавить `yurikarandeev.github.io` и `localhost` |
-| `permission-denied` при синхронизации | не опубликованы правила Firestore | Firestore → Rules → вставить [`../firestore.rules`](../firestore.rules) → Publish |
+| `Вход: Firebase Authentication не настроен…` | Firebase Authentication не инициализирован | Authentication → **Get started**, затем включить провайдер Google |
+| `Вход: вход через Google выключен` | провайдер Google выключен | Authentication → Sign-in method → Google → **Enable** |
+| `Вход: этот домен не разрешён…` | домена нет в списке разрешённых | Authentication → Settings → **Authorized domains** → добавить `yurikarandeev.github.io` и `localhost` |
+| `Чтение из облака: Firestore отклонил доступ` (`permission-denied`) | не опубликованы правила Firestore | Firestore Database → **Rules** → вставить [`../firestore.rules`](../firestore.rules) → **Publish** → «Синхронизировать сейчас» |
+| `Чтение из облака: в проекте нет базы Firestore` (`not-found`) | база не создана | Firestore Database → **Create database** → регион `eur3` |
+| `исчерпана квота Firebase` (`resource-exhausted`) | дневной лимит тарифа Spark | дождаться сброса квоты; данные остаются на устройстве |
 | «Ошибка синхронизации» без кода | нет сети или истёк вход | проверить сеть; выйти из аккаунта и войти снова |
 | Данные есть на одном устройстве и нет на другом | синхронизация ещё не сработала | нажать «Синхронизировать сейчас» или вернуться на вкладку |
+
+### Если `permission-denied` остаётся после публикации правил
+
+1. **Правила для нужного продукта.** Нужен раздел *Firestore Database → Rules* (не Realtime Database
+   и не Storage). Вверху страницы должны быть база `(default)` и проект `mentor-1c954`
+   (он же в [`.firebaserc`](../.firebaserc)).
+2. **Правила действительно применились.** После **Publish** вкладка Rules показывает текст из
+   [`../firestore.rules`](../firestore.rules) с `match /users/{uid}/{document=**}`. Если внизу остался
+   `allow read, write: if false;`, публикация не прошла.
+3. **App Check не в режиме Enforce.** App Check → *Cloud Firestore*: при включённом **Enforce** запросы
+   отвергаются даже с верными правилами. Для PWA на GitHub Pages снимите Enforce или добавьте
+   debug-токен.
+4. **Вход выполнен под тем же пользователем**, что указан в правилах: приложение пишет в
+   `users/{uid}/…`, где `uid` берётся из токена Firebase.
+5. **База именно `(default)`.** Engine не передаёт `databaseId`, значит используется база по умолчанию.
+
+Текст ошибки в интерфейсе показывает этап и подсказку; исходное сообщение Firebase
+(`Missing or insufficient permissions.`) печатается в консоль браузера с префиксом `[sync:pull]`.
 
 Полное описание схемы, алгоритма и квот — в [`SYNC.md`](SYNC.md).
 

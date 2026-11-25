@@ -151,6 +151,55 @@ check(!('goal' in plain), 'toPlain убирает undefined из объекто�
 check(plain.items[1] === null, 'toPlain превращает undefined в массивах в null');
 check(!('note' in plain.items[0]) && plain.nested.keep === 1, 'toPlain чистит вложенные структуры');
 
+/* --- тексты ошибок для интерфейса --- */
+
+const errors = await import(pathToFileURL(path.resolve('src/lib/sync/errors.ts')).href);
+
+const denied = errors.describeSyncError(
+  { code: 'permission-denied', message: 'Missing or insufficient permissions.' },
+  'pull'
+);
+check(denied.code === 'permission-denied', 'код permission-denied распознан');
+check(denied.message.startsWith('Чтение из облака'), 'сообщение об ошибке указывает этап чтения');
+check(!/missing or insufficient/i.test(denied.message), 'английский текст Firestore не показывается пользователю');
+check(denied.hint.includes('firestore.rules'), 'подсказка отправляет к правилам Firestore');
+check(denied.fatal === true, 'permission-denied не повторяется автоматически');
+check(denied.raw.includes('Missing or insufficient permissions'), 'исходный текст сохранён для логов');
+
+const deniedByText = errors.describeSyncError(new Error('Missing or insufficient permissions.'));
+check(deniedByText.code === 'permission-denied', 'ошибка доступа распознаётся и по тексту без кода');
+
+const offlineError = errors.describeSyncError({ code: 'unavailable' }, 'push');
+check(offlineError.fatal === false, 'сетевую ошибку повторяем автоматически');
+check(offlineError.message.startsWith('Отправка в облако'), 'этап отправки попадает в сообщение');
+
+const noDatabase = errors.describeSyncError({ code: 'not-found' }, 'pull');
+check(noDatabase.hint.includes('Create database'), 'для not-found подсказка про создание базы');
+
+const quota = errors.describeSyncError({ code: 'resource-exhausted' }, 'push');
+check(quota.hint.includes('Spark'), 'для исчерпанной квоты упомянут тариф Spark');
+
+const authDomain = errors.describeSyncError({ code: 'auth/unauthorized-domain' }, 'auth');
+check(authDomain.message.startsWith('Вход'), 'ошибки входа помечены этапом «Вход»');
+check(authDomain.hint.includes('Authorized domains'), 'подсказка про Authorized domains сохранена');
+
+const unknownError = errors.describeSyncError(new Error('boom'), 'push');
+check(
+  unknownError.message.includes('boom') && unknownError.fatal === false,
+  'неизвестная ошибка показывает исходный текст и повторяется'
+);
+
+check(errors.describeSyncError(null).message.length > 0, 'пустое значение ошибки не ломает описание');
+check(
+  errors.rulesConsoleUrl('mentor-1c954') ===
+    'https://console.firebase.google.com/project/mentor-1c954/firestore/rules',
+  'ссылка на правила ведёт в проект Firebase'
+);
+check(
+  errors.rulesConsoleUrl(' ').startsWith('https://console.firebase.google.com/'),
+  'без projectId ссылка ведёт на общую консоль'
+);
+
 if (failures.length > 0) {
   console.error(`\nПровалено проверок: ${failures.length}`);
   process.exit(1);

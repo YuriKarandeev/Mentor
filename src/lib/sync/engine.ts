@@ -25,6 +25,7 @@ import {
 } from '../db/db';
 import { uid } from '../utils/ids';
 import { SYNC_ENABLED } from './config';
+import { describeSyncError, type SyncErrorInfo, type SyncStep } from './errors';
 import { loadFirebase, type Firebase } from './firebase';
 import {
   COLLECTION_PROFILE,
@@ -71,10 +72,26 @@ let loop: ReturnType<typeof setInterval> | null = null;
 let started = false;
 let listenersBound = false;
 let device: string | null = null;
+/** Фатальная ошибка: автоповторы бессмысленны, ждём действий пользователя. */
+let paused: SyncErrorInfo | null = null;
 
-function errorText(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return String(e);
+function reportError(e: unknown, step: SyncStep): SyncErrorInfo {
+  const info = describeSyncError(e, step);
+  sync.status = 'error';
+  sync.error = info.message;
+  sync.errorHint = info.hint;
+  sync.errorCode = info.code;
+  // Служебный текст остаётся в консоли: по нему удобно искать причину.
+  console.warn(`[sync:${step}] ${info.code || 'error'}: ${info.raw || info.message}`);
+  if (info.fatal) paused = info;
+  return info;
+}
+
+function clearError(): void {
+  sync.error = '';
+  sync.errorHint = '';
+  sync.errorCode = '';
+  paused = null;
 }
 
 function timestampMs(value: unknown): number {
@@ -108,8 +125,7 @@ export async function initSync(): Promise<void> {
   try {
     fb = await loadFirebase();
   } catch (e) {
-    sync.status = 'error';
-    sync.error = `Не удалось загрузить Firebase: ${errorText(e)}`;
+    reportError(e, 'init');
     return;
   }
 
@@ -119,8 +135,7 @@ export async function initSync(): Promise<void> {
       void handleUser(fb, user);
     },
     (e) => {
-      sync.status = 'error';
-      sync.error = errorText(e);
+      reportError(e, 'auth');
     }
   );
 
@@ -130,11 +145,13 @@ export async function initSync(): Promise<void> {
   try {
     await fb.authMod.getRedirectResult(fb.auth);
   } catch (e) {
-    sync.error = `Вход через Google не завершён: ${errorText(e)}`;
+    reportError(e, 'auth');
   }
 }
 
 async function handleUser(fb: Firebase, user: User | null): Promise<void> {
+  // Новый вход или выход — прошлые фатальные ошибки больше не актуальны.
+  paused = null;
   if (!user) {
     ctx = null;
     stopLoop();
@@ -189,6 +206,9 @@ export async function setAutoSync(value: boolean): Promise<void> {
 }
 
 export async function syncNow(): Promise<void> {
+  // Ручной запуск повторяем даже после фатальной ошибки: пользователь мог
+  // только что опубликовать правила или включить базу.
+  paused = null;
   await syncOnce('manual');
 }
 
@@ -221,13 +241,12 @@ function stopLoop(): void {
 }
 
 function scheduleSync(delay = 1500): void {
-  if (!ctx || !sync.auto || debounce !== null) return;
+  if (!ctx || !sync.auto || paused || debounce !== null) return;
   debounce = setTimeout(() => {
     debounce = null;
     void syncOnce('auto');
   }, delay);
 }
-
 
 /* ------------------------------------------------------------ главный цикл */
 
@@ -241,11 +260,14 @@ async function syncOnce(_reason: string): Promise<void> {
 
   running = true;
   sync.status = 'syncing';
-  sync.error = '';
+  clearError();
+  let step: SyncStep = 'pull';
   try {
     let appliedRemote = 0;
     for (let i = 0; i < FULL_CYCLE_LIMIT; i += 1) {
+      step = 'pull';
       const pulled = await pull(current);
+      step = 'push';
       const pushed = await push(current);
       appliedRemote += pulled;
       if (pulled === 0 && pushed === 0) break;
@@ -257,8 +279,9 @@ async function syncOnce(_reason: string): Promise<void> {
     if (appliedRemote > 0) sync.revision += 1;
     if (sync.pending > 0) scheduleSync(3000);
   } catch (e) {
-    sync.status = 'error';
-    sync.error = errorText(e);
+    const info = reportError(e, step);
+    // Нет прав, нет базы, истекла сессия — повторять каждые 60 секунд бессмысленно.
+    if (!info.fatal) scheduleSync(5000);
   } finally {
     running = false;
   }

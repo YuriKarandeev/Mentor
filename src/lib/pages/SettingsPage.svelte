@@ -6,6 +6,8 @@
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
   import { sync } from '../sync/state.svelte';
+  import { firebaseConfig } from '../sync/config';
+  import { describeSyncError, rulesConsoleUrl, type SyncStep } from '../sync/errors';
   import { formatDate } from '../utils/format';
 
   const MODELS = ['deepseek-flash', 'deepseek-v4-pro'];
@@ -41,38 +43,29 @@
 
   let syncBusy = $state(false);
   let syncMessage = $state('');
+  let syncHint = $state('');
   let syncFailed = $state(false);
 
   const loadEngine = () => import('../sync/engine');
 
-  function syncErrorText(e: unknown): string {
-    const code = (e as { code?: string }).code ?? '';
-    switch (code) {
-      case 'auth/unauthorized-domain':
-        return 'Этот домен не разрешён: добавьте его в Firebase Authentication → Authorized domains.';
-      case 'auth/operation-not-allowed':
-        return 'Вход через Google выключен: включите провайдер Google в консоли Firebase.';
-      case 'auth/configuration-not-found':
-        return 'Firebase Authentication не настроен для проекта.';
-      case 'auth/popup-closed-by-user':
-        return 'Окно входа закрыто до завершения.';
-      case 'permission-denied':
-        return 'Firestore отклонил запрос: опубликуйте правила из firestore.rules.';
-      default:
-        return e instanceof Error ? e.message : String(e);
-    }
+  /** Ошибка Firebase → понятный текст; подсказку показываем под сообщением. */
+  function failText(e: unknown, step: SyncStep): string {
+    const info = describeSyncError(e, step);
+    syncHint = info.hint;
+    return info.message;
   }
 
   async function signIn(): Promise<void> {
     syncBusy = true;
     syncMessage = '';
+    syncHint = '';
     syncFailed = false;
     try {
       const { signInWithGoogle } = await loadEngine();
       await signInWithGoogle();
     } catch (e) {
       syncFailed = true;
-      syncMessage = syncErrorText(e);
+      syncMessage = failText(e, 'auth');
     } finally {
       syncBusy = false;
     }
@@ -81,6 +74,7 @@
   async function signOut(): Promise<void> {
     syncBusy = true;
     syncMessage = '';
+    syncHint = '';
     syncFailed = false;
     try {
       const { signOutSync } = await loadEngine();
@@ -88,7 +82,7 @@
       syncMessage = 'Вы вышли из аккаунта. Данные остались на устройстве.';
     } catch (e) {
       syncFailed = true;
-      syncMessage = syncErrorText(e);
+      syncMessage = failText(e, 'auth');
     } finally {
       syncBusy = false;
     }
@@ -98,18 +92,20 @@
     syncBusy = true;
     syncFailed = false;
     syncMessage = '';
+    syncHint = '';
     try {
       const { syncNow } = await loadEngine();
       await syncNow();
       if (sync.error) {
         syncFailed = true;
         syncMessage = sync.error;
+        syncHint = sync.errorHint;
       } else {
         syncMessage = sync.pending > 0 ? `Осталось отправить: ${sync.pending}` : 'Готово, всё синхронизировано.';
       }
     } catch (e) {
       syncFailed = true;
-      syncMessage = syncErrorText(e);
+      syncMessage = failText(e, 'unknown');
     } finally {
       syncBusy = false;
     }
@@ -132,14 +128,16 @@
     syncBusy = true;
     syncFailed = false;
     syncMessage = '';
+    syncHint = '';
     try {
       const { wipeCloud } = await loadEngine();
       await wipeCloud();
       syncFailed = Boolean(sync.error);
       syncMessage = sync.error || 'Облачная копия очищена.';
+      syncHint = sync.error ? sync.errorHint : '';
     } catch (e) {
       syncFailed = true;
-      syncMessage = syncErrorText(e);
+      syncMessage = failText(e, 'wipe');
     } finally {
       syncBusy = false;
     }
@@ -440,7 +438,19 @@
       {:else if sync.lastSyncAt > 0}
         <p class="mute tiny">Последняя синхронизация: {formatDate(sync.lastSyncAt)}</p>
       {/if}
-      {#if sync.error}<div class="err">{sync.error}</div>{/if}
+      {#if sync.error}
+        <div class="err">
+          <div>{sync.error}</div>
+          {#if sync.errorHint}<div class="mute tiny">{sync.errorHint}</div>{/if}
+          {#if sync.errorCode === 'permission-denied'}
+            <div class="tiny">
+              <a href={rulesConsoleUrl(firebaseConfig.projectId)} target="_blank" rel="noreferrer">
+                Открыть правила Firestore
+              </a>
+            </div>
+          {/if}
+        </div>
+      {/if}
 
       <label class="switch">
         <input type="checkbox" checked={sync.auto} onchange={toggleAuto} />
@@ -457,7 +467,12 @@
         </button>
       </div>
 
-      {#if syncMessage}<div class={syncFailed ? 'err' : 'ok'}>{syncMessage}</div>{/if}
+      {#if syncMessage}
+        <div class={syncFailed ? 'err' : 'ok'}>
+          <div>{syncMessage}</div>
+          {#if syncFailed && syncHint}<div class="mute tiny">{syncHint}</div>{/if}
+        </div>
+      {/if}
 
       <p class="mute tiny">
         В облако уходят темы, планы, чаты, конспекты, память и профиль. Токен прокси и настройки устройства
@@ -472,7 +487,12 @@
       <button class="btn btn-primary" onclick={signIn} disabled={syncBusy}>
         {syncBusy ? 'Открываю Google…' : 'Войти через Google'}
       </button>
-      {#if syncMessage}<div class={syncFailed ? 'err' : 'ok'}>{syncMessage}</div>{/if}
+      {#if syncMessage}
+        <div class={syncFailed ? 'err' : 'ok'}>
+          <div>{syncMessage}</div>
+          {#if syncFailed && syncHint}<div class="mute tiny">{syncHint}</div>{/if}
+        </div>
+      {/if}
     {/if}
   </section>
 

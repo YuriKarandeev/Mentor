@@ -121,11 +121,22 @@ Firebase попадает в отдельный чанк (≈110–130 КБ gzip
 
 ## Частые ошибки
 
+Приложение показывает этап («Чтение из облака: …», «Отправка в облако: …») и подсказку, что делать;
+служебный текст Firebase остаётся в консоли браузера с префиксом `[sync:<этап>]`. Сетевые ошибки
+движок повторяет сам, а «постоянные» (нет прав, нет базы, истекла сессия) — нет, чтобы не тратить квоту:
+после исправления нажмите «Синхронизировать сейчас».
+
 | Симптом | Причина | Что делать |
 | --- | --- | --- |
-| `auth/unauthorized-domain` | домен не добавлен в Authorized domains | добавить `yurikarandeev.github.io` и `localhost` |
-| `auth/operation-not-allowed` / `CONFIGURATION_NOT_FOUND` | провайдер Google выключен или Auth не инициализирован | Authentication → Sign-in method → Google → Enable |
-| `permission-denied` | не опубликованы правила | вставить `firestore.rules` в консоли |
-| Окно входа не открывается | блокировщик всплывающих окон | приложение автоматически пробует редирект; разрешить попапы для сайта |
-| «Ошибка синхронизации: The query requires an index» | в проекте отключены авто-индексы | создать композитный индекс по `srvUpdatedAt` (обычно не требуется) |
-| Синхронизация «залипла» | нет сети или истёк вход | проверить сеть, выйти и войти заново |
+| `Вход: этот домен не разрешён…` (`auth/unauthorized-domain`) | домен не добавлен в Authorized domains | добавить `yurikarandeev.github.io` и `localhost` |
+| `Вход: вход через Google выключен` (`auth/operation-not-allowed`) или `auth/configuration-not-found` | провайдер Google выключен либо Auth не инициализирован | Authentication → Sign-in method → Google → Enable |
+| `Чтение из облака: Firestore отклонил доступ` (`permission-denied`) | в проекте остались правила по умолчанию `allow read, write: if false` | Firestore Database → **Rules** → вставить [`firestore.rules`](../firestore.rules) → **Publish** → «Синхронизировать сейчас». Ссылка «Открыть правила Firestore» в настройках ведёт сразу в консоль |
+| То же, но правила опубликованы | включён **App Check** в режиме *Enforce* для Cloud Firestore | App Check → Cloud Firestore → снять Enforce (или зарегистрировать приложение и добавить debug-токен) |
+| `permission-denied` после публикации правил | правила применены не к той базе или не к тому продукту | правила публикуются для базы `(default)` в проекте из `.firebaserc`; убедитесь, что это **Firestore Database → Rules**, а не Realtime Database |
+| `permission-denied`, хотя вход выполнен | в правилах нет условия `request.auth.uid == uid` | сравните текст правил с [`firestore.rules`](../firestore.rules): корень должен быть `match /users/{uid}/{document=**}` |
+| `Чтение из облака: в проекте нет базы Firestore` (`not-found`) | база не создана | Firestore Database → Create database → регион `eur3`, режим production |
+| `исчерпана квота Firebase` (`resource-exhausted`) | дневной лимит тарифа Spark | дождаться сброса квоты; данные остаются на устройстве |
+| «The query requires an index» (`failed-precondition`) | в проекте отключены авто-индексы | создать композитный индекс по `srvUpdatedAt` по ссылке из консоли браузера |
+| Окно входа не открывается (`auth/popup-blocked`) | блокировщик всплывающих окон | приложение автоматически пробует редирект; разрешить попапы для сайта |
+| Синхронизация «залипла» (`unavailable`) | нет сети | проверить сеть; движок повторит сам через несколько секунд |
+
