@@ -8,7 +8,8 @@ Firebase используется только как канал обмена, �
 - Настройки устройства (`kv.settings`: адрес прокси, `APP_TOKEN`, модель, тема) **никогда** не уходят в облако —
   они относятся к конкретному браузеру. Профиль ученика синхронизируется.
 
-Код: `src/lib/sync/` (`config`, `firebase`, `model`, `engine`, `state.svelte`), правила — `firestore.rules`.
+Код: `src/lib/sync/` (`config`, `firebase`, `model`, `engine`, `errors`, `state.svelte`), правила — `firestore.rules`.
+`errors.ts` переводит коды Firebase в русские тексты с этапом и подсказкой; проверяется в `npm run test:sync`.
 
 ## Что нужно сделать один раз в консоли Firebase
 
