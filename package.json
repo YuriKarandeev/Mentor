@@ -10,7 +10,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "smoke": "node scripts/smoke.mjs",
     "icons": "node scripts/gen-icons.mjs",
-    "test:sync": "node scripts/test-sync.mjs"
+    "test:sync": "node scripts/test-sync.mjs",
+    "probe:book": "node scripts/probe-book.mjs"
   },
   "dependencies": {
     "dexie": "^4.4.7",

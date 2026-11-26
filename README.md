@@ -39,6 +39,7 @@ npm run test:sync  # проверки логики синхронизации (�
 npm run build      # dist/
 npm run smoke      # проверка собранного dist без запуска сервера
 npm run preview    # локальный просмотр сборки
+npm run probe:book -- --help   # диагностика обрыва стрима книги (см. docs/SETUP.md)
 ```
 
 ## Подключение DeepSeek
@@ -55,8 +56,9 @@ npm run preview    # локальный просмотр сборки
 
 Без прокси приложение работает локально (темы, планы, заметки), но не может получать ответы модели.
 
-Если связь не устанавливается — разбор типовых ошибок (`Failed to fetch`, `404 not_found_error`,
-`401`, блокировка `npm`/`npx` в PowerShell) в [`docs/SETUP.md`](docs/SETUP.md).
+Если связь не устанавливается — разбор типовых ошибок (`Failed to fetch`, обрыв долгого ответа
+`Load failed`, `404 not_found_error`, `401`, блокировка `npm`/`npx` в PowerShell) в
+[`docs/SETUP.md`](docs/SETUP.md).
 
 ## Публикация на GitHub Pages
 

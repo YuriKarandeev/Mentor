@@ -11,6 +11,10 @@
  *   GET  /api/user/balance     → GET  /user/balance
  *   POST /api/chat/completions → POST /chat/completions (в т.ч. stream: true, ответ идёт потоком)
  *
+ * Диагностика: каждый запрос к /api/* пишет в лог (wrangler tail) время до
+ * заголовков DeepSeek, статус upstream, объём и длительность стрима, а также
+ * отдельную строку, если соединение закрыл клиент. Секреты в логи не попадают.
+ *
  * Секреты (wrangler secret put ...):
  *   DEEPSEEK_API_KEY — ключ DeepSeek (обязательно)
  *   APP_TOKEN        — токен приложения, который вводится в настройках PWA (обязательно)
@@ -63,6 +67,8 @@ function safeEqual(a, b) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // Время от приёма запроса — по нему в `wrangler tail` видно, где копится задержка.
+    const startedAt = Date.now();
     const path = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
     const allowOrigin = pickOrigin(request, env);
 
@@ -109,13 +115,27 @@ export default {
       init.body = await request.text();
     }
 
+    const isStream = (request.headers.get('accept') || '').includes('text/event-stream');
+
+    console.log(`[proxy] → ${request.method} ${upstreamPath}${isStream ? ' · stream' : ''}`);
+    if (request.signal) {
+      request.signal.addEventListener('abort', () => {
+        console.log(`[proxy] ✖ клиент закрыл соединение через ${Date.now() - startedAt} мс`);
+      });
+    }
+
     let upstream;
     try {
       upstream = await fetch(target, init);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.log(`[proxy] ✖ upstream недоступен через ${Date.now() - startedAt} мс: ${message}`);
       return json({ error: `Не удалось связаться с DeepSeek: ${message}` }, 502, allowOrigin);
     }
+
+    console.log(
+      `[proxy] ← ${upstream.status} за ${Date.now() - startedAt} мс (заголовки upstream${isStream ? ', стрим' : ''})`
+    );
 
     const resHeaders = corsHeaders(allowOrigin, {
       'content-type': upstream.headers.get('content-type') || 'application/json; charset=utf-8',
@@ -124,6 +144,23 @@ export default {
       'x-accel-buffering': 'no'
     });
 
-    return new Response(upstream.body, { status: upstream.status, headers: resHeaders });
+    // Для стрима считаем байты: в логах видно объём и момент завершения.
+    let body = upstream.body;
+    if (isStream && body) {
+      let bytes = 0;
+      body = body.pipeThrough(
+        new TransformStream({
+          transform(chunk, controller) {
+            bytes += chunk.byteLength || 0;
+            controller.enqueue(chunk);
+          },
+          flush() {
+            console.log(`[proxy] ✔ стрим завершён: ${bytes} Б за ${Date.now() - startedAt} мс`);
+          }
+        })
+      );
+    }
+
+    return new Response(body, { status: upstream.status, headers: resHeaders });
   }
 };
