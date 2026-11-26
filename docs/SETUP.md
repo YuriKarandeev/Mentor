@@ -100,6 +100,21 @@ curl.exe -s -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-qu
 частичный ответ ментора — как сообщение в теме, а в интерфейсе появляется подсказка,
 что текст неполный.
 
+### После обновления: фронт сам, воркер руками
+
+GitHub Actions собирает и публикует только приложение (GitHub Pages). Воркер Cloudflare
+обновляется отдельно — после изменений в `worker/` его нужно задеплоить, иначе новых
+heartbeat-пингов, лимита 240 с и ответа `504` на проде не будет:
+
+```powershell
+cd worker
+npm.cmd run deploy            # = proxy:deploy, то же что npx.cmd -y wrangler@latest deploy
+npm.cmd run tail              # проверить, что новая версия отвечает
+```
+
+Если wrangler ещё не авторизован — сначала `npm.cmd run proxy:login`. Адрес воркера
+после деплоя не меняется, поэтому в «Настройках» приложения ничего править не нужно.
+
 ### Логи воркера
 
 ```powershell

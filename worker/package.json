@@ -9,6 +9,8 @@
     "proxy:dev": "npx -y wrangler@latest dev",
     "proxy:tail": "npx -y wrangler@latest tail",
     "proxy:secret:key": "npx -y wrangler@latest secret put DEEPSEEK_API_KEY",
-    "proxy:secret:token": "npx -y wrangler@latest secret put APP_TOKEN"
+    "proxy:secret:token": "npx -y wrangler@latest secret put APP_TOKEN",
+    "deploy": "npx -y wrangler@latest deploy",
+    "tail": "npx -y wrangler@latest tail"
   }
 }

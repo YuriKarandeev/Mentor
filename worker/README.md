@@ -37,7 +37,9 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 То же самое через скрипты из `worker/package.json` (не требуют установки зависимостей):
 
 ```powershell
-npm.cmd run proxy:deploy     # proxy:login, proxy:dev, proxy:tail, proxy:secret:key, proxy:secret:token
+npm.cmd run deploy           # = proxy:deploy: npx -y wrangler@latest deploy
+npm.cmd run tail             # = proxy:tail: npx -y wrangler@latest tail
+npm.cmd run proxy:deploy     # полный набор: proxy:login, proxy:dev, proxy:tail, proxy:secret:key, proxy:secret:token
 ```
 
 `wrangler deploy` выводит адрес вида `https://nastavnik-deepseek-proxy.<workers-subdomain>.workers.dev`.
