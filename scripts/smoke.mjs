@@ -33,6 +33,7 @@ check(cssFiles.length > 0, 'собран CSS-бандл');
 const js = jsFiles.map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8')).join('\n');
 check(js.includes('Наставник'), 'в бандле есть строки интерфейса');
 check(js.includes('deepseek'), 'в бандле есть клиент DeepSeek');
+check(js.includes('api.deepseek.com'), 'в бандле есть прямой адрес DeepSeek API');
 check(js.includes('Синхронизация'), 'в бандле есть раздел синхронизации');
 
 const firebaseFiles = jsFiles.filter((f) =>

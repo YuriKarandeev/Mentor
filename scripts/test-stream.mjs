@@ -18,6 +18,7 @@ const {
   FirstByteTimeoutError,
   RemoteStreamError,
   StreamInterruptedError,
+  StreamStallError,
   classifyStreamFailure,
   describeStreamError,
   isAbortError
@@ -42,8 +43,8 @@ for (const text of [
 }
 const safari = new TypeError('Load failed');
 check(
-  /прокси/i.test(describeStreamError(safari, { stage: 'connect' })),
-  'до соединения советуем проверить прокси'
+  /Настройк|прокси/i.test(describeStreamError(safari, { stage: 'connect' })),
+  'до соединения советуем проверить подключение в настройках'
 );
 check(/Load failed/.test(describeStreamError(safari)), 'во время стрима упоминаем «Load failed» для Safari');
 
@@ -51,6 +52,16 @@ check(/Load failed/.test(describeStreamError(safari)), 'во время стри
 const timeout = new FirstByteTimeoutError(90);
 check(classifyStreamFailure(timeout) === 'first-byte-timeout', 'таймаут первого байта классифицируется');
 check(/90/.test(describeStreamError(timeout)), 'в тексте таймаута есть число секунд');
+
+// --- молчание посреди потока (у прямого DeepSeek нет пингов) ---
+const stall = new StreamStallError(180);
+check(classifyStreamFailure(stall) === 'stall', 'молчание посреди потока → stall');
+check(/180/.test(describeStreamError(stall)), 'в тексте stall есть число секунд');
+check(
+  /повторите запрос/i.test(describeStreamError(stall)),
+  'совет для stall — повторить запрос'
+);
+check(classifyStreamFailure({ name: 'StreamStallError' }) === 'stall', 'StreamStallError распознаётся по name');
 
 // --- ошибка из SSE ---
 check(

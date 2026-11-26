@@ -1,6 +1,9 @@
 import type { Citation } from '../db/db';
 import type { Annotation, BalanceResponse, ChatResponse, ToolCall, Usage } from './types';
-import { FirstByteTimeoutError, RemoteStreamError } from './stream-error';
+import { FirstByteTimeoutError, RemoteStreamError, StreamStallError } from './stream-error';
+import { isProxy, type Connection } from './conn';
+
+export type { ConnMode, Connection } from './conn';
 
 export class ApiError extends Error {
   status: number;
@@ -22,22 +25,35 @@ export function isBadRequest(error: unknown): boolean {
   return error instanceof ApiError && error.status === 400;
 }
 
-export interface Connection {
-  baseUrl: string;
-  token: string;
-}
-
+/**
+ * Полный URL запроса. У воркера пути начинаются с `/api/…`, у DeepSeek такого
+ * префикса нет: в прямом режиме он срезается (`/api/chat/completions` →
+ * `/chat/completions`).
+ */
 function endpoint(conn: Connection, path: string): string {
   const base = conn.baseUrl.trim().replace(/\/+$/, '');
   if (!base) {
-    throw new ApiError(0, 'Не задан адрес прокси. Откройте «Настройки» и укажите URL воркера.');
+    throw new ApiError(
+      0,
+      isProxy(conn)
+        ? 'Не задан адрес прокси. Откройте «Настройки» и укажите URL воркера.'
+        : 'Не задан адрес DeepSeek API. Откройте «Настройки» и проверьте подключение.'
+    );
   }
-  return `${base}${path.startsWith('/') ? '' : '/'}${path}`;
+  const rest = isProxy(conn) ? path : path.replace(/^\/api(?=\/)/, '');
+  return `${base}${rest.startsWith('/') ? '' : '/'}${rest}`;
 }
 
 function authHeaders(conn: Connection): Record<string, string> {
   const h: Record<string, string> = { 'content-type': 'application/json' };
   const token = conn.token.trim();
+  if (!isProxy(conn)) {
+    if (!token) {
+      throw new ApiError(0, 'Не указан ключ DeepSeek. Откройте «Настройки» → «Ключ DeepSeek API».');
+    }
+    h['authorization'] = `Bearer ${token}`;
+    return h;
+  }
   if (token) h['x-app-token'] = token;
   return h;
 }
@@ -149,6 +165,14 @@ interface RawStream {
 /** Сколько ждём первый байт (включая heartbeat-пинги прокси), прежде чем сообщить о таймауте. */
 const FIRST_BYTE_TIMEOUT_MS = 90_000;
 
+/**
+ * Сколько ждём следующий кусок уже открытого потока. Воркер шлёт `: ping`
+ * каждые 10 с молчания, у DeepSeek такого heartbeat нет — сторож нужен, чтобы
+ * умершее соединение не висело до таймаута браузера (это минуты и без текста
+ * об ошибке).
+ */
+const STALL_TIMEOUT_MS = 180_000;
+
 function describeRemoteError(error: unknown): string {
   if (typeof error === 'string' && error) return error;
   if (typeof error === 'object' && error !== null) {
@@ -167,10 +191,12 @@ function describeRemoteError(error: unknown): string {
 export interface StreamOptions {
   /** Переопределение ожидания первого байта (нужно тестам и «быстрым» сценариям). */
   firstByteTimeoutMs?: number;
+  /** Сколько допустимо молчание посреди потока; `0` — не следить. */
+  stallTimeoutMs?: number;
 }
 
 /**
- * Стриминговый запрос к /chat/completions через прокси.
+ * Стриминговый запрос к /chat/completions — напрямую в DeepSeek или через прокси.
  * Устойчив к незнакомым событиям: разбираем только те поля, которые знаем.
  */
 export async function chatStream(
@@ -181,6 +207,7 @@ export async function chatStream(
   options: StreamOptions = {}
 ): Promise<StreamResult> {
   const firstByteTimeoutMs = options.firstByteTimeoutMs ?? FIRST_BYTE_TIMEOUT_MS;
+  const stallTimeoutMs = options.stallTimeoutMs ?? STALL_TIMEOUT_MS;
 
   // Свой контроллер нужен, чтобы оборвать запрос по нашему таймауту
   // и при этом пробросить отмену из интерфейса («Стоп»).
@@ -302,9 +329,21 @@ export async function chatStream(
   };
 
   let firstByteSeen = false;
+  let stallTimedOut = false;
+  let stallId: ReturnType<typeof setTimeout> | undefined;
+  const armStall = (): void => {
+    clearTimeout(stallId);
+    if (!(stallTimeoutMs > 0)) return;
+    stallId = setTimeout(() => {
+      stallTimedOut = true;
+      controller.abort();
+    }, stallTimeoutMs);
+  };
   try {
     while (!finished) {
+      armStall();
       const { value, done } = await reader.read();
+      clearTimeout(stallId);
       if (done) break;
       if (!firstByteSeen) {
         firstByteSeen = true;
@@ -316,8 +355,10 @@ export async function chatStream(
     if (!finished) drainLines(true);
   } catch (e) {
     if (firstByteTimedOut) throw timeoutError();
+    if (stallTimedOut) throw new StreamStallError(Math.round(stallTimeoutMs / 1000));
     throw e;
   } finally {
+    clearTimeout(stallId);
     cleanup();
     try {
       await reader.cancel();

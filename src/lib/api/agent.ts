@@ -3,10 +3,10 @@ import {
   chatOnce,
   chatStream,
   isBadRequest,
-  type Connection,
   type StreamHandlers,
   type StreamResult
 } from './deepseek';
+import { connectionOf, type Connection } from './conn';
 import { BOOK_SYSTEM, SUMMARY_SYSTEM, mentorSystem, plannerSystem } from './prompts';
 import {
   SAVE_PLAN_TOOL,
@@ -20,8 +20,9 @@ import type { AppSettings, Effort, Plan, Profile, Topic } from '../db/db';
 import type { ApiMessage, Usage } from './types';
 import { requestVariants, type RequestBody } from './request-variants';
 
+/** Соединение из настроек устройства: прямой ключ или прокси-воркер. */
 export function connFrom(settings: AppSettings): Connection {
-  return { baseUrl: settings.proxyUrl, token: settings.appToken };
+  return connectionOf(settings);
 }
 
 /** DeepSeek: thinking + reasoning_effort (low | high | max). */

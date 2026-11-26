@@ -71,7 +71,8 @@ const profile = {
   updatedAt: 3000,
   appToken: 'super-secret-token',
   proxyUrl: 'https://proxy.example.workers.dev',
-  settings: { appToken: 'nested-secret' }
+  deepseekKey: 'sk-deepseek-secret',
+  settings: { appToken: 'nested-secret', deepseekKey: 'sk-nested-secret' }
 };
 
 const memory = { topicId: 't_1', text: 'краткое резюме', updatedAt: 4000, dirty: 1 };
@@ -83,6 +84,10 @@ const serializedProfile = JSON.stringify(profileDoc);
 check(!serializedProfile.includes('super-secret-token'), 'профиль в облако не содержит appToken');
 check(!serializedProfile.includes('nested-secret'), 'профиль в облако не содержит вложенных настроек');
 check(!serializedProfile.includes('proxyUrl'), 'профиль в облако не содержит адрес прокси');
+check(
+  !serializedProfile.includes('deepseekKey') && !serializedProfile.includes('sk-deepseek-secret'),
+  'профиль в облако не содержит ключ DeepSeek'
+);
 check(profileDoc.name === 'Юрий' && Array.isArray(profileDoc.goals), 'профиль в облако содержит нужные поля');
 
 const payloads = {

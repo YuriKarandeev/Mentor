@@ -94,7 +94,7 @@
     <main>
       {#if !settings.configured && route.name !== 'settings'}
         <div class="setup">
-          Остался один шаг: укажите адрес прокси и токен.
+          Остался один шаг: настройте подключение к DeepSeek.
           <button class="btn btn-sm btn-primary" onclick={() => router.go('/settings')}>Настроить</button>
         </div>
       {/if}

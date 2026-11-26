@@ -35,7 +35,7 @@
       return;
     }
     if (!settings.configured) {
-      formError = 'Сначала укажите адрес прокси в настройках';
+      formError = 'Сначала настройте подключение к DeepSeek в «Настройках»';
       return;
     }
     draft = {

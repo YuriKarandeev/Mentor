@@ -45,7 +45,7 @@
     const q = query.trim();
     if (!q || busy) return;
     if (!settings.configured) {
-      error = 'Сначала укажите адрес прокси в «Настройках».';
+      error = 'Сначала настройте подключение к DeepSeek в «Настройках».';
       return;
     }
     if (!settings.data.webSearch) {

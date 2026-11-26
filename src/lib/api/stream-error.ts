@@ -32,9 +32,25 @@ export class StreamInterruptedError extends Error {
   }
 }
 
+/**
+ * Соединение открыто, но новых данных нет дольше отведённого времени.
+ * У прокси простой закрывают пинги, у прямого DeepSeek их нет — сторож
+ * обрывает молчащий поток, чтобы не ждать таймаута браузера.
+ */
+export class StreamStallError extends Error {
+  readonly seconds: number;
+
+  constructor(seconds: number) {
+    super(`Соединение молчит дольше ${seconds} с`);
+    this.name = 'StreamStallError';
+    this.seconds = seconds;
+  }
+}
+
 export type StreamFailure =
   | 'abort'
   | 'first-byte-timeout'
+  | 'stall'
   | 'remote'
   | 'interrupted'
   | 'network'
@@ -100,6 +116,7 @@ export function isAbortError(error: unknown): boolean {
 export function classifyStreamFailure(error: unknown): StreamFailure {
   const name = errorName(error);
   if (error instanceof FirstByteTimeoutError || name === 'FirstByteTimeoutError') return 'first-byte-timeout';
+  if (error instanceof StreamStallError || name === 'StreamStallError') return 'stall';
   if (error instanceof RemoteStreamError || name === 'RemoteStreamError') return 'remote';
   if (error instanceof StreamInterruptedError || name === 'StreamInterruptedError') return 'interrupted';
   if (isAbortError(error)) return 'abort';
@@ -129,6 +146,9 @@ export function describeStreamError(error: unknown, options: DescribeOptions = {
     case 'first-byte-timeout':
       text = `${message}. Модель не успела начать ответ — уменьшите глубину размышлений или повторите запрос.`;
       break;
+    case 'stall':
+      text = `${message}. Ответ мог не дойти из-за сети — повторите запрос или уменьшите глубину размышлений.`;
+      break;
     case 'remote':
       text = `DeepSeek вернул ошибку: ${message}`;
       break;
@@ -144,7 +164,7 @@ export function describeStreamError(error: unknown, options: DescribeOptions = {
     case 'network':
       text =
         stage === 'connect'
-          ? 'Не удалось соединиться с прокси: проверьте сеть, адрес воркера и токен приложения.'
+          ? 'Не удалось соединиться с DeepSeek: проверьте сеть и подключение в «Настройках» (ключ или адрес прокси).'
           : 'Соединение оборвалось до конца ответа (Safari пишет «Load failed»). Проверьте сеть и повторите запрос.';
       break;
     default:

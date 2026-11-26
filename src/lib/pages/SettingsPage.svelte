@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getBalance, listModels, ApiError } from '../api/deepseek';
+  import { connectionOf, type ConnMode } from '../api/conn';
   import { webToolsSupported } from '../api/agent';
   import { db, wipeAll, type Effort, type Level, type ThemeMode } from '../db/db';
   import { profile } from '../stores/profile.svelte';
@@ -20,13 +21,36 @@
 
   let hydrated = false;
   let form = $state({
+    mode: 'direct' as ConnMode,
     proxyUrl: '',
     appToken: '',
+    deepseekKey: '',
     model: 'deepseek-flash',
     effort: 'high' as Effort,
     webSearch: true,
     theme: 'auto' as ThemeMode
   });
+
+  /**
+   * Прокси-режим — запасной путь: ключ DeepSeek остаётся на сервере, в браузере
+   * лежит только `APP_TOKEN`. Он прячется за `?advanced=1`, но если уже выбран
+   * в сохранённых настройках, поля показываются и без флага — иначе из этого
+   * режима было бы не выйти.
+   */
+  let advanced = $state(typeof location !== 'undefined' && new URLSearchParams(location.search).has('advanced'));
+  const showModeSelect = $derived(advanced || form.mode === 'proxy');
+
+  /** Включает запасной режим и запоминает флаг в адресе страницы. */
+  function showAdvanced(): void {
+    advanced = true;
+    const url = new URL(location.href);
+    url.searchParams.set('advanced', '1');
+    history.replaceState(null, '', url);
+  }
+
+  const canCheck = $derived(
+    form.mode === 'proxy' ? form.proxyUrl.trim().length > 0 : form.deepseekKey.trim().length > 0
+  );
 
   let prof = $state({
     name: '',
@@ -165,8 +189,10 @@
   async function saveSettings(): Promise<void> {
     try {
       await settings.patch({
+        mode: form.mode,
         proxyUrl: form.proxyUrl.trim(),
         appToken: form.appToken.trim(),
+        deepseekKey: form.deepseekKey.trim(),
         model: form.model,
         effort: form.effort,
         webSearch: form.webSearch,
@@ -183,7 +209,7 @@
     connResult = '';
     connOk = false;
     try {
-      const conn = { baseUrl: form.proxyUrl.trim(), token: form.appToken.trim() };
+      const conn = connectionOf(form);
       const models = await listModels(conn);
       let bal = '';
       try {
@@ -304,22 +330,61 @@
 <div class="page">
   <header class="page-head">
     <h1>Настройки</h1>
-    <p class="muted small">Ключ API хранится только в Cloudflare и никогда не попадает в приложение.</p>
+    <p class="muted small">
+      {#if form.mode === 'proxy'}
+        Ключ DeepSeek хранится в вашем прокси-воркере и в приложение не попадает.
+      {:else}
+        Ключ DeepSeek хранится только в этом браузере и уходит напрямую в api.deepseek.com.
+      {/if}
+    </p>
   </header>
 
   <section class="card col">
     <h2>Подключение</h2>
 
-    <div>
-      <label for="proxy">Адрес прокси (Cloudflare Worker)</label>
-      <input id="proxy" bind:value={form.proxyUrl} placeholder="https://study-proxy.you.workers.dev" />
-    </div>
+    {#if showModeSelect}
+      <div>
+        <label for="mode">Способ подключения</label>
+        <select id="mode" bind:value={form.mode}>
+          <option value="direct">Прямой доступ (ключ DeepSeek)</option>
+          <option value="proxy">Свой прокси (Cloudflare Worker)</option>
+        </select>
+      </div>
+    {/if}
 
-    <div>
-      <label for="token">Токен приложения (x-app-token)</label>
-      <input id="token" type="password" bind:value={form.appToken} placeholder="длинная случайная строка" />
-      <p class="mute tiny">Тот же токен, что задан командой wrangler secret put APP_TOKEN.</p>
-    </div>
+    {#if form.mode === 'proxy'}
+      <div>
+        <label for="proxy">Адрес прокси (Cloudflare Worker)</label>
+        <input id="proxy" bind:value={form.proxyUrl} placeholder="https://study-proxy.you.workers.dev" />
+      </div>
+
+      <div>
+        <label for="token">Токен приложения (x-app-token)</label>
+        <input id="token" type="password" bind:value={form.appToken} placeholder="длинная случайная строка" />
+        <p class="mute tiny">Тот же токен, что задан командой wrangler secret put APP_TOKEN.</p>
+      </div>
+    {:else}
+      <div>
+        <label for="key">Ключ DeepSeek API</label>
+        <input
+          id="key"
+          type="password"
+          bind:value={form.deepseekKey}
+          placeholder="sk-…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <p class="mute tiny">
+          Ключ создаётся в консоли DeepSeek:
+          <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">platform.deepseek.com</a>
+          → API keys; там же баланс и лимиты. Запросы идут напрямую в api.deepseek.com.
+        </p>
+        <p class="mute tiny">
+          Ключ лежит только в этом браузере (IndexedDB) и не синхронизируется. На общем компьютере
+          сохранять его не стоит.
+        </p>
+      </div>
+    {/if}
 
     <div class="row wrap">
       <div class="grow">
@@ -356,13 +421,20 @@
 
     <div class="row wrap">
       <button class="btn btn-primary" onclick={saveSettings}>Сохранить</button>
-      <button class="btn" onclick={check} disabled={checking || !form.proxyUrl.trim()}>
+      <button class="btn" onclick={check} disabled={checking || !canCheck}>
         {checking ? 'Проверяю…' : 'Проверить связь'}
       </button>
     </div>
 
     {#if connResult}
       <div class={connOk ? 'ok' : 'err'}>{connResult}</div>
+    {/if}
+
+    {#if !advanced && form.mode === 'direct'}
+      <p class="mute tiny">
+        Нельзя держать ключ в браузере? Поднимите прокси-воркер и включите запасной режим:
+        <button type="button" class="linkish" onclick={showAdvanced}>дополнительные настройки</button>
+      </p>
     {/if}
   </section>
 
@@ -487,9 +559,9 @@
       {/if}
 
       <p class="mute tiny">
-        В облако уходят темы, планы, чаты, конспекты, память и профиль. Токен прокси и настройки устройства
-        остаются только здесь. Конфликты решаются по времени изменения — при правке одного пункта на двух
-        устройствах останется последняя версия.
+        В облако уходят темы, планы, чаты, конспекты, память и профиль. Ключ DeepSeek, токен прокси и
+        настройки устройства остаются только здесь. Конфликты решаются по времени изменения — при правке
+        одного пункта на двух устройствах останется последняя версия.
       </p>
     {:else}
       <p class="mute tiny">
@@ -585,6 +657,17 @@
   }
 
   label.btn {
+    cursor: pointer;
+  }
+
+  /* Кнопка-ссылка «дополнительные настройки»: выглядит как текст. */
+  .linkish {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    text-decoration: underline;
     cursor: pointer;
   }
 </style>

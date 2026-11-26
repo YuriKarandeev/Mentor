@@ -50,6 +50,9 @@ jobs:
       - name: Stream error tests
         run: npm run test:stream
 
+      - name: Connection mode tests
+        run: npm run test:conn
+
       - name: Generate PWA icons
         run: npm run icons
 

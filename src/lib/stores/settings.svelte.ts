@@ -1,3 +1,4 @@
+import { connectionOf, isConfigured, type Connection } from '../api/conn';
 import { DEFAULT_SETTINGS, getKv, setKv, type AppSettings } from '../db/db';
 
 const KEY = 'settings';
@@ -18,12 +19,13 @@ class SettingsStore {
     await setKv(KEY, $state.snapshot(this.data));
   }
 
+  /** Готово ли подключение: ключ DeepSeek (direct) или адрес воркера (proxy). */
   get configured(): boolean {
-    return this.data.proxyUrl.trim().length > 0;
+    return isConfigured(this.data);
   }
 
-  get connection() {
-    return { baseUrl: this.data.proxyUrl, token: this.data.appToken };
+  get connection(): Connection {
+    return connectionOf(this.data);
   }
 }
 

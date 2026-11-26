@@ -1,4 +1,5 @@
 import Dexie, { type Table, type Transaction } from 'dexie';
+import type { ConnMode } from '../api/conn';
 import { notifyLocalChange } from '../sync/signal';
 import { now, uid } from '../utils/ids';
 import { toPlainValue } from '../utils/plain';
@@ -104,8 +105,12 @@ export interface MemoryRow {
 }
 
 export interface AppSettings {
+  /** `direct` — ключ DeepSeek в этом браузере; `proxy` — запросы через воркер. */
+  mode: ConnMode;
   proxyUrl: string;
   appToken: string;
+  /** Ключ DeepSeek для прямого режима. В облако не уходит. */
+  deepseekKey: string;
   model: string;
   effort: Effort;
   webSearch: boolean;
@@ -205,8 +210,11 @@ class StudyDB extends Dexie {
 export const db = new StudyDB();
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  // Прямой доступ по умолчанию: ключ вводится в «Настройках», воркер не нужен.
+  mode: 'direct',
   proxyUrl: (import.meta.env.VITE_DEFAULT_PROXY_URL as string | undefined) ?? '',
   appToken: '',
+  deepseekKey: '',
   model: 'deepseek-flash',
   effort: 'high',
   webSearch: true,
