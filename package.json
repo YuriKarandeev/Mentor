@@ -12,6 +12,7 @@
     "icons": "node scripts/gen-icons.mjs",
     "test:sync": "node scripts/test-sync.mjs",
     "test:stream": "node scripts/test-stream.mjs",
+    "test:worker": "node scripts/test-worker.mjs",
     "probe:book": "node scripts/probe-book.mjs"
   },
   "dependencies": {

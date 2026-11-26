@@ -10,6 +10,7 @@
  * Запуск (PowerShell):
  *   $env:PROXY_URL="https://<worker>.workers.dev"; $env:APP_TOKEN="..."; npm.cmd run probe:book
  *   npm.cmd run probe:book -- --url https://... --token ... --effort high
+ *   $env:DEEPSEEK_API_KEY="sk-..."; npm.cmd run probe:book -- --direct   # в обход воркера
  *   npm.cmd run probe:book -- --dry-run          # только показать тело запроса
  *
  * Токен не печатается и никуда не сохраняется. Зависимостей нет.
@@ -49,6 +50,7 @@ function printHelp() {
   --token <APP_TOKEN>    токен приложения                                    (APP_TOKEN)
 
 Необязательно:
+  --key <ключ>           ключ DeepSeek для режима --direct                   (DEEPSEEK_API_KEY)
   --query <текст>        что за книга (по умолчанию «Думай медленно… решай быстро, Канеман»)
   --model <id>           модель DeepSeek (по умолчанию deepseek-flash)
   --effort <low|high|max> глубина размышлений (по умолчанию low, как в приложении)
@@ -58,6 +60,8 @@ function printHelp() {
   --timeout <сек>        общий лимит запроса (по умолчанию 300)
   --first-byte-timeout <сек>  сколько ждать первый байт (по умолчанию 120)
   --dry-run              показать тело запроса и выйти
+  --direct               идти напрямую в api.deepseek.com (нужен DEEPSEEK_API_KEY),
+                         без воркера — так видно, рвётся ли стрим у самого DeepSeek
   --help                 эта справка
 
 Коды выхода: 0 — стрим дошёл целиком; 2 — ошибка, обрыв или пустой ответ.
@@ -75,8 +79,13 @@ if (args.flags.has('help')) {
   process.exit(0);
 }
 
-const url = ((args.values.url || process.env.PROXY_URL || '').trim()).replace(/\/+$/, '');
-const token = (args.values.token || process.env.APP_TOKEN || '').trim();
+const direct = args.flags.has('direct');
+const url = direct
+  ? 'https://api.deepseek.com'
+  : (args.values.url || process.env.PROXY_URL || '').trim().replace(/\/+$/, '');
+const token = direct
+  ? (args.values.key || process.env.DEEPSEEK_API_KEY || '').trim()
+  : (args.values.token || process.env.APP_TOKEN || '').trim();
 const query = args.values.query || 'Думай медленно… решай быстро, Канеман';
 const model = args.values.model || 'deepseek-flash';
 const effort = args.values.effort || 'low';
@@ -106,9 +115,14 @@ if (args.flags.has('dry-run')) {
   process.exit(0);
 }
 
-if (!url || !token) {
-  fail('нужны адрес воркера и токен: --url и --token (или PROXY_URL и APP_TOKEN). Справка: --help');
+if (!token) {
+  fail(
+    direct
+      ? 'нужен ключ DeepSeek: --key (или переменная окружения DEEPSEEK_API_KEY). Справка: --help'
+      : 'нужны адрес воркера и токен: --url и --token (или PROXY_URL и APP_TOKEN). Справка: --help'
+  );
 }
+if (!direct && !url) fail('нужен адрес воркера: --url (или PROXY_URL). Справка: --help');
 if (!/^https?:\/\//.test(url)) fail('адрес воркера должен начинаться с http:// или https://');
 if (!Number.isFinite(maxTokens) || maxTokens < 1) fail('--max-tokens должен быть положительным числом');
 
@@ -117,7 +131,7 @@ const started = performance.now();
 const elapsed = () => Math.round(performance.now() - started);
 const log = (text) => console.log(`[${pretty(elapsed()).padStart(7)}] ${text}`);
 
-console.log(`Прокси:  ${url}`);
+console.log(direct ? 'Канал:   напрямую api.deepseek.com (без Cloudflare)' : `Прокси:  ${url}`);
 console.log(
   `Модель:  ${model} · effort=${useThinking ? effort : 'выкл'} · веб-поиск=${useTools ? 'да' : 'нет'} · max_tokens=${maxTokens}`
 );
@@ -137,13 +151,12 @@ const totalTimer = setTimeout(() => {
 
 let res;
 try {
-  res = await fetch(`${url}/api/chat/completions`, {
+  const headers = { 'content-type': 'application/json', accept: 'text/event-stream' };
+  if (direct) headers.authorization = `Bearer ${token}`;
+  else headers['x-app-token'] = token;
+  res = await fetch(`${url}${direct ? '/chat/completions' : '/api/chat/completions'}`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'text/event-stream',
-      'x-app-token': token
-    },
+    headers,
     body: JSON.stringify(body),
     signal: controller.signal
   });
@@ -155,7 +168,11 @@ try {
   log(`✖ запрос не выполнен: ${name}: ${message}`);
   if (why === 'first-byte') log(`Причина: не дождались заголовков за ${firstByteTimeoutSec} с (наш таймаут).`);
   if (why === 'total') log(`Причина: превышен общий лимит ${totalTimeoutSec} с (наш таймаут).`);
-  console.log('\nВердикт: воркер не ответил даже заголовками — смотрите `wrangler tail` и DNS/адрес прокси.');
+  console.log(
+    direct
+      ? '\nВердикт: DeepSeek не ответил даже заголовками напрямую — проблема на стороне DeepSeek или вашей сети, Cloudflare тут ни при чём.'
+      : '\nВердикт: воркер не ответил даже заголовками — смотрите логи воркера в дашборде Cloudflare и DNS/адрес прокси.'
+  );
   process.exit(2);
 }
 
@@ -285,7 +302,9 @@ if (streamError) {
   } else if (why === 'total') {
     verdict = `Запрос не завершился за ${totalTimeoutSec} с — стрим слишком долгий.`;
   } else if (name === 'TypeError' || /load failed|failed to fetch|network|terminated/i.test(message)) {
-    verdict = `Соединение оборвано на ${pretty(totalMs)} — ровно как «Load failed» в приложении.`;
+    verdict = direct
+      ? `Соединение с DeepSeek оборвано на ${pretty(totalMs)} без участия Cloudflare — стрим рвёт сам DeepSeek.`
+      : `Соединение оборвано на ${pretty(totalMs)} — ровно как «Load failed» в приложении.`;
   } else {
     verdict = `Обрыв или ошибка потока: ${message}`;
   }

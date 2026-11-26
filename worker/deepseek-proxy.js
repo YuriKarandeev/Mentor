@@ -44,14 +44,35 @@ function sseErrorFrame(message) {
   );
 }
 
+/** Таймер, который можно дождаться и отменить (нужен для `Promise.race` с чтением upstream). */
+function timerPromise(ms) {
+  let timer = null;
+  const promise = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    }
+  };
+}
+
 /**
  * Поток ответа клиенту поверх тела ответа DeepSeek.
  *
- * Раньше тело шло через `pipeThrough(new TransformStream(...))`: пинги enqueue'ились
- * в TransformStream, но на проде до клиента не доходили (probe:book показывал 4584 Б
- * и 65 с тишины), а обрыв чтения upstream уходил в браузер как «Load failed».
- * Поэтому читаем upstream явно — так видно причину обрыва в логах, а клиент
- * получает кадр `event: error` вместо сетевой ошибки.
+ * История правок — обе ошибки воспроизводились на проде:
+ * 1. `pipeThrough(new TransformStream(...))` — пинги enqueue'ились, но до клиента
+ *    не доходили (probe:book показывал 4584 Б и 65 с тишины), а обрыв чтения
+ *    upstream уходил в браузер как «Load failed».
+ * 2. `async start(controller)` с `await reader.read()` внутри — пинги из
+ *    `setInterval` тоже не доходили: пока промис `start()` не разрешён, workerd
+ *    держит поток в состоянии «starting» и кадры, добавленные из таймерных
+ *    колбэков, не флашатся клиенту (проверено на `/api/diag/stream`, где `start`
+ *    синхронный: там пинги доходили).
+ * Поэтому `start` теперь синхронный, а чтение upstream живёт в фоновом `pump`:
+ * пинг ждётся через `Promise.race([read(), таймер])` в том же awaited-контексте.
  *
  * - в простое отправляет SSE-комментарий `: ping` — клиент его игнорирует,
  *   но Cloudflare и мобильный Safari не закрывают соединение по простою;
@@ -61,17 +82,9 @@ function sseErrorFrame(message) {
 function proxyStream(upstreamBody, { startedAt }) {
   let bytes = 0;
   let closed = false;
+  let pings = 0;
   /** @type {ReadableStreamDefaultReader | null} */
   let reader = null;
-  let pingTimer = null;
-  let limitTimer = null;
-
-  const stopTimers = () => {
-    if (pingTimer !== null) clearInterval(pingTimer);
-    if (limitTimer !== null) clearTimeout(limitTimer);
-    pingTimer = null;
-    limitTimer = null;
-  };
 
   /** Безопасная отправка кадра: поток мог закрыться со стороны клиента. */
   const send = (controller, chunk) => {
@@ -83,73 +96,131 @@ function proxyStream(upstreamBody, { startedAt }) {
     }
   };
 
-  return new ReadableStream({
-    async start(controller) {
+  /** Закрытие потока: если клиент уже ушёл, ошибку глотаем. */
+  const close = (controller) => {
+    try {
+      controller.close();
+    } catch {
+      /* поток уже закрыт */
+    }
+  };
+
+  /**
+   * Фоновая задача: читает upstream и параллельно шлёт пинги в простое.
+   *
+   * Запускается из синхронного `start`, а не является телом `async start`:
+   * pending промис в `start` блокирует доставку кадров, добавленных из таймеров.
+   * Пинг ждётся в том же awaited-контексте, что и `reader.read()`.
+   */
+  const pump = async (controller) => {
+    let lastPingAt = Date.now();
+
+    try {
       reader = upstreamBody.getReader();
-
-      pingTimer = setInterval(() => {
+      let pending = reader.read();
+      for (;;) {
         if (closed) return;
-        if (!send(controller, SSE_PING)) stopTimers();
-      }, STREAM_IDLE_PING_MS);
+        const elapsed = Date.now() - startedAt;
 
-      limitTimer = setTimeout(() => {
-        if (closed) return;
-        const seconds = Math.round(STREAM_LIMIT_MS / 1000);
-        console.log(`[proxy] ✖ стрим дольше ${seconds} с — закрываю (${bytes} Б)`);
-        closed = true;
-        stopTimers();
-        send(
-          controller,
-          sseErrorFrame(`Ответ идёт дольше ${seconds} с. Попробуйте ещё раз или уменьшите глубину размышлений.`)
-        );
-        try {
-          controller.close();
-        } catch {
-          /* поток уже закрыт */
+        if (elapsed >= STREAM_LIMIT_MS) {
+          const seconds = Math.round(STREAM_LIMIT_MS / 1000);
+          console.log(`[proxy] ✖ стрим дольше ${seconds} с — закрываю (${bytes} Б, пингов ${pings})`);
+          closed = true;
+          send(
+            controller,
+            sseErrorFrame(`Ответ идёт дольше ${seconds} с. Попробуйте ещё раз или уменьшите глубину размышлений.`)
+          );
+          close(controller);
+          reader?.cancel()?.catch(() => {});
+          return;
         }
-        reader?.cancel()?.catch(() => {});
-      }, STREAM_LIMIT_MS);
 
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        // Ждём либо чанк от DeepSeek, либо момент очередного пинга (что раньше).
+        const waitMs = Math.max(
+          0,
+          Math.min(STREAM_IDLE_PING_MS - (Date.now() - lastPingAt), STREAM_LIMIT_MS - elapsed)
+        );
+        const tick = timerPromise(waitMs);
+        const next = await Promise.race([
+          // reject чтения превращаем в значение: иначе при гонке с таймером
+          // получился бы необработанный rejected promise (и ошибка бы терялась).
+          pending.then(
+            (result) => ({ kind: 'chunk', result }),
+            (error) => ({ kind: 'error', error })
+          ),
+          tick.promise.then(() => ({ kind: 'timeout' }))
+        ]);
+        tick.cancel();
+
+        if (next.kind === 'error') throw next.error;
+
+        if (next.kind === 'chunk') {
+          const { done, value } = next.result;
+          if (done) {
+            closed = true;
+            console.log(
+              `[proxy] ✔ стрим завершён: ${bytes} Б за ${Date.now() - startedAt} мс (пингов ${pings})`
+            );
+            close(controller);
+            return;
+          }
           bytes += value?.byteLength || 0;
-          controller.enqueue(value);
+          if (!send(controller, value)) {
+            // Клиент ушёл: отменяем и чтение upstream, чтобы не тратить токены.
+            closed = true;
+            reader?.cancel()?.catch(() => {});
+            return;
+          }
+          pending = reader.read();
+          continue;
         }
-        closed = true;
-        stopTimers();
-        console.log(`[proxy] ✔ стрим завершён: ${bytes} Б за ${Date.now() - startedAt} мс`);
-        try {
-          controller.close();
-        } catch {
-          /* поток уже закрыт */
+
+        // DeepSeek молчит — держим соединение пингом.
+        lastPingAt = Date.now();
+        pings += 1;
+        if (pings === 1 || pings % 6 === 0) {
+          console.log(`[proxy] · ping ${pings} @ ${lastPingAt - startedAt} мс (от DeepSeek ${bytes} Б)`);
         }
-      } catch (err) {
-        stopTimers();
-        // Отмена клиентом уже залогирована в cancel() — здесь только реальные обрывы.
-        if (closed) return;
-        closed = true;
-        const message = err instanceof Error ? err.message : String(err);
-        console.log(`[proxy] ✖ чтение upstream прервано через ${Date.now() - startedAt} мс (${bytes} Б): ${message}`);
-        send(
-          controller,
-          sseErrorFrame(
-            `Соединение с DeepSeek прервалось (${message}). Повторите запрос — уже полученный текст сохранится как черновик.`
-          )
-        );
-        try {
-          controller.close();
-        } catch {
-          /* клиент уже ушёл */
+        if (!send(controller, SSE_PING)) {
+          closed = true;
+          reader?.cancel()?.catch(() => {});
+          return;
         }
       }
+    } catch (err) {
+      if (closed) return;
+      closed = true;
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(
+        `[proxy] ✖ чтение upstream прервано через ${Date.now() - startedAt} мс (${bytes} Б, пингов ${pings}): ${message}`
+      );
+      send(
+        controller,
+        sseErrorFrame(
+          `Соединение с DeepSeek прервалось (${message}). Повторите запрос — уже полученный текст сохранится как черновик.`
+        )
+      );
+      close(controller);
+      reader?.cancel()?.catch(() => {});
+    }
+  };
+
+  return new ReadableStream({
+    start(controller) {
+      // Синхронный start: Response уходит клиенту сразу, поток начинает читаться,
+      // а чтение upstream и пинги живут в фоновом pump (см. комментарий к функции).
+      void pump(controller).catch((err) => {
+        // Страховка: pump ловит свои ошибки сам, сюда попадают только совсем неожиданные.
+        console.log(`[proxy] ✖ фоновая задача стрима упала: ${err instanceof Error ? err.message : String(err)}`);
+        close(controller);
+      });
     },
     cancel() {
       if (closed) return;
       closed = true;
-      stopTimers();
-      console.log(`[proxy] ✖ стрим отменён клиентом: ${bytes} Б за ${Date.now() - startedAt} мс`);
+      console.log(
+        `[proxy] ✖ стрим отменён клиентом: ${bytes} Б, пингов ${pings}, за ${Date.now() - startedAt} мс`
+      );
       reader?.cancel()?.catch(() => {});
     }
   });
@@ -250,7 +321,11 @@ export default {
       const pingSeconds = Math.min(Math.max(Number(url.searchParams.get('ping')) || STREAM_IDLE_PING_MS / 1000, 1), 60);
       const encoder = new TextEncoder();
       const diagStartedAt = Date.now();
+      const endAt = diagStartedAt + seconds * 1000;
+      const pingMs = pingSeconds * 1000;
       let sentBytes = 0;
+      let pings = 0;
+      let finished = false;
 
       const stream = new ReadableStream({
         start(controller) {
@@ -261,34 +336,47 @@ export default {
           };
           push(`data: ${JSON.stringify({ ok: true, event: 'start', seconds, pingSeconds })}\n\n`);
 
-          const pingTimer = setInterval(() => {
+          // Пинги ждём в awaited-цикле, а не в setInterval: ровно так устроен pump()
+          // боевого стрима, поэтому тест канала проверяет тот же механизм.
+          void (async () => {
+            let nextPingAt = diagStartedAt + pingMs;
             try {
-              sentBytes += SSE_PING.byteLength;
-              controller.enqueue(SSE_PING);
+              for (;;) {
+                const waitMs = Math.min(nextPingAt, endAt) - Date.now();
+                if (waitMs > 0) await timerPromise(waitMs).promise;
+                if (Date.now() >= endAt) break;
+                controller.enqueue(SSE_PING);
+                sentBytes += SSE_PING.byteLength;
+                pings += 1;
+                nextPingAt += pingMs;
+                // если воркер «проспал» несколько тиков — не спамим пачкой пингов
+                if (nextPingAt <= Date.now()) nextPingAt = Date.now() + pingMs;
+              }
             } catch {
-              clearInterval(pingTimer);
-            }
-          }, pingSeconds * 1000);
-
-          setTimeout(() => {
-            clearInterval(pingTimer);
-            try {
-              push(
-                `data: ${JSON.stringify({
-                  ok: true,
-                  event: 'end',
-                  elapsedMs: Date.now() - diagStartedAt,
-                  bytes: sentBytes
-                })}\n\ndata: [DONE]\n\n`
+              /* клиент ушёл — end всё равно попробуем отправить */
+            } finally {
+              if (!finished) {
+                finished = true;
+                try {
+                  push(
+                    `data: ${JSON.stringify({
+                      ok: true,
+                      event: 'end',
+                      elapsedMs: Date.now() - diagStartedAt,
+                      bytes: sentBytes,
+                      pings
+                    })}\n\ndata: [DONE]\n\n`
+                  );
+                  controller.close();
+                } catch {
+                  /* клиент уже ушёл */
+                }
+              }
+              console.log(
+                `[proxy] diag/stream: ${seconds} с, пинг ${pingSeconds} с, пингов ${pings}, ${sentBytes} Б за ${Date.now() - diagStartedAt} мс`
               );
-              controller.close();
-            } catch {
-              /* клиент уже ушёл */
             }
-            console.log(
-              `[proxy] diag/stream: ${seconds} с, пинг ${pingSeconds} с, ${sentBytes} Б за ${Date.now() - diagStartedAt} мс`
-            );
-          }, seconds * 1000);
+          })();
         }
       });
 
