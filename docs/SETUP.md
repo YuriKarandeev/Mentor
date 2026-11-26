@@ -86,6 +86,7 @@ curl.exe -s -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-qu
 | DeepSeek долго молчит до первого байта (`reasoning_effort: high` + веб-поиск) | `npm run probe:book` → строка «Первый чанк» больше 60 с | **Настройки → Глубина размышлений → `low`** и повторить запрос |
 | Простой соединения: сон экрана, мобильный Safari, переключение сети | ошибка через 1–3 минуты, в логах воркера — `✖ стрим отменён клиентом` | не гасить экран, повторить запрос (воркер шлёт heartbeat-пинги каждые 10 с простоя) |
 | Service worker или установленная PWA | в обычной вкладке браузера тот же запрос проходит | пользоваться вкладкой, переустановить PWA (сбросить кэш) |
+| Канал до `*.workers.dev` режет большие ответы (DPI провайдера, антивирус с проверкой HTTPS, корпоративный прокси) | `probe:book` показывает 8–24 КБ и «TypeError: terminated», а `/api/diag/stream` с пингами работает; `curl … /api/diag/gen?chunks=30&size=1000&whole=1` отдаёт 24048 из 30000 Б, локальный `wrangler dev` — все 30000 Б | перенести воркер на свой домен (Workers → Settings → Domains & Routes → Add custom domain) либо на другой хостинг; проверить с мобильного интернета |
 
 ### Что уже защищено
 
@@ -96,7 +97,8 @@ curl.exe -s -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-qu
 | Клиент, ожидание заголовков | `FirstByteTimeoutError` → совет проверить прокси/веб-поиск | 90 с |
 | Клиент, чтение потока | обрыв сети → русский текст с подсказкой про Safari/Chrome | — |
 | Воркер, ожидание DeepSeek | `504`, текст «DeepSeek не ответил заголовками за … мс» | 60 с |
-| Воркер, простой стрима | SSE-пинг `: ping` каждые 10 с из awaited-цикла (`Promise.race` с чтением upstream) — прокси и Safari не считают соединение мёртвым | 10 с |
+| Воркер, простой стрима | SSE-пинг `: ping` каждые 10 с из awaited-цикла (`Promise.race` с чтением upstream); кадры пишутся через `writer.write()` в `IdentityTransformStream` — только так workerd флашит их клиенту | 10 с |
+| Воркер, доставка кадров | кадр отдаётся клиенту до чтения следующего чанка upstream (`await write(...)`), поэтому ответ не «залипает» в буфере | — |
 | Воркер, обрыв чтения upstream | кадр `event: error` с причиной и `[DONE]` — вместо сетевой ошибки у клиента | — |
 | Воркер, общий лимит стрима | кадр `event: error` и закрытие потока | 240 с |
 | Воркер, проверка канала | `GET /api/diag/stream?seconds=60` — пинги без участия DeepSeek | — |
@@ -158,11 +160,42 @@ curl.exe -N -H "x-app-token: <APP_TOKEN>" "https://<worker>.workers.dev/api/diag
 Та же логика проверяется офлайн, без деплоя и без ключей DeepSeek:
 
 ```powershell
-npm.cmd run test:worker     # scripts/test-worker.mjs: health, 401, diag, пинги в простое, обрыв upstream
+npm.cmd run test:worker     # scripts/test-worker.mjs: health, 401, diag, пинги в простое, обрыв upstream, доставка 30 КБ
 ```
 
-Тест идёт около 15 с: ждёт пинг на 10-й секунде молчащего upstream и проверяет, что обрыв
-чтения превращается в кадр `event: error` с русским текстом.
+Тест идёт около 30 с: ждёт пинг на 10-й секунде молчащего upstream, проверяет, что обрыв
+чтения превращается в кадр `event: error` с русским текстом, и что 30 КБ отдаются целиком
+(и потоком, и одним телом).
+
+### Если до клиента доходят только первые килобайты
+
+Симптом: воркер пишет `✔ стрим завершён: 30108 Б за 1218 мс`, а клиент получил 8–24 КБ и
+висит до RST (`TypeError: terminated`). Три проверки отделяют код воркера от канала:
+
+```powershell
+$w = "https://<worker>.workers.dev"
+
+# 1) сколько DeepSeek реально отдаёт — воркер вычитывает поток сам, без стрима клиенту
+curl.exe -sS -H "x-app-token: <APP_TOKEN>" -H "content-type: application/json" `
+  -H "accept: text/event-stream" --data-binary "@body.json" "$w/api/diag/collect?seconds=90"
+# → {"bytes":37052,"chunks":110,"maxGapMs":383,"sawDone":true,...} — DeepSeek в порядке
+
+# 2) сколько байт доходит от воркера до клиента (модель не участвует)
+curl.exe -sS -H "x-app-token: <APP_TOKEN>" -o NUL `
+  -w "%{http_code} %{size_download}" "$w/api/diag/gen?chunks=30&size=1000&whole=1"
+# → 200 30000 — канал в порядке; 200 24048 и обрыв — канал режет ответ
+
+# 3) то же на локальном воркере, без Cloudflare
+cd worker; npx.cmd -y wrangler@latest dev     # APP_TOKEN=dev-token в worker/.dev.vars
+curl.exe -sS -H "x-app-token: dev-token" -o NUL `
+  -w "%{http_code} %{size_download}" "http://127.0.0.1:8787/api/diag/gen?chunks=30&size=1000&whole=1"
+```
+
+Локально приходит 30000 Б, с `*.workers.dev` — 24048 Б и обрыв: код воркера ни при чём,
+режется канал (DPI у провайдера, антивирус с проверкой HTTPS, корпоративный прокси).
+Признак именно канала: `/health` и `/api/diag/stream` с пингами проходят, а всё больше
+~20 КБ — нет. Что делать: проверить с мобильного интернета (диагноз за минуту), перенести
+воркер на свой домен или поднять тот же прокси на другом хостинге.
 
 ### Логи воркера
 

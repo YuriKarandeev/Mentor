@@ -62,22 +62,28 @@ async function drain(res) {
   return { text, pingAt, firstChunkAt, elapsedMs: Date.now() - startedAt };
 }
 
-/** Тело ответа upstream по сценарию: чанк → пауза → чанк/ошибка → close. */
+/**
+ * Тело ответа upstream по сценарию: чанк → пауза → чанк/ошибка → close.
+ *
+ * Чтение через `pull`, как у настоящего сетевого тела: `async start` держит
+ * поток в состоянии «starting» и не отдаёт данные до своего завершения.
+ */
 function scenarioBody(steps) {
+  const left = [...steps];
   return new ReadableStream({
-    async start(controller) {
-      for (const step of steps) {
-        if (step.wait) await delay(step.wait);
-        if (step.error) {
-          controller.error(new Error(step.error));
-          return;
-        }
-        if (step.chunk) controller.enqueue(encoder.encode(step.chunk));
-        if (step.close) {
-          controller.close();
-          return;
-        }
+    async pull(controller) {
+      const step = left.shift();
+      if (!step) {
+        controller.close();
+        return;
       }
+      if (step.wait) await delay(step.wait);
+      if (step.error) {
+        controller.error(new Error(step.error));
+        return;
+      }
+      if (step.chunk) controller.enqueue(encoder.encode(step.chunk));
+      if (step.close) controller.close();
     }
   });
 }
@@ -179,7 +185,58 @@ console.log('\nproxyStream: обрыв чтения upstream («terminated»)');
   }
 }
 
-// --- 6. upstream без тела (не стрим) ---
+// --- 6. diag/burst: доставка быстрого потока через proxyStream ---
+console.log('\n/api/diag/burst?chunks=120&size=160&gap=1');
+{
+  const res = await call('/api/diag/burst?chunks=120&size=160&gap=1');
+  const expected = Number(res.headers.get('x-diag-expected-bytes'));
+  const { text, elapsedMs } = await drain(res);
+  check(expected === 120 * 160, `в заголовке ожидаемо ${120 * 160} Б`, String(expected));
+  check(
+    text.length === expected,
+    `через proxyStream дошли все ${expected} Б (получено ${text.length})`,
+    `получено ${text.length}`
+  );
+  check(elapsedMs < 15000, `быстрый upstream доставлен за ${elapsedMs} мс`);
+}
+
+// --- 7. diag/burst?raw=1: тот же upstream без обёртки ---
+console.log('\n/api/diag/burst?chunks=120&size=160&raw=1');
+{
+  const res = await call('/api/diag/burst?chunks=120&size=160&raw=1');
+  const expected = Number(res.headers.get('x-diag-expected-bytes'));
+  const { text } = await drain(res);
+  check(res.headers.get('x-diag-raw') === '1', 'raw-режим помечен заголовком');
+  check(text.length === expected, `raw тоже отдаёт все ${expected} Б`, `получено ${text.length}`);
+}
+
+// --- 8. diag/silent: пинги без DeepSeek (пинг штатный — раз в 10 с) ---
+console.log('\n/api/diag/silent?seconds=12');
+{
+  const res = await call('/api/diag/silent?seconds=12');
+  const { pingAt, text } = await drain(res);
+  check(pingAt.length >= 1, `молчащий upstream держится пингом (${pingAt.join(', ')} мс)`);
+  check(text.length > 0, 'данные upstream дошли');
+}
+
+// --- 9. diag/gen: объём и не-потоковый ответ ---
+console.log('\n/api/diag/gen?chunks=30&size=1000 (whole и поток)');
+{
+  const wholeRes = await call('/api/diag/gen?chunks=30&size=1000&whole=1');
+  const whole = await drain(wholeRes);
+  check(
+    Number(wholeRes.headers.get('x-diag-expected-bytes')) === 30000,
+    'в заголовке ожидаемо 30000 Б',
+    String(wholeRes.headers.get('x-diag-expected-bytes'))
+  );
+  check(whole.text.length === 30000, `whole-ответ целиком (${whole.text.length} Б)`, `${whole.text.length} Б`);
+
+  const streamRes = await call('/api/diag/gen?chunks=30&size=1000');
+  const streamed = await drain(streamRes);
+  check(streamed.text.length === 30000, `поток целиком (${streamed.text.length} Б)`, `${streamed.text.length} Б`);
+}
+
+// --- 10. upstream без тела (не стрим) ---
 console.log('\nupstream: обычный JSON-ответ');
 {
   const realFetch = globalThis.fetch;

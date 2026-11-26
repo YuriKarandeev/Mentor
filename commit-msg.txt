@@ -1,0 +1,21 @@
+fix(worker): отдавать кадры клиенту через writer.write, диагностика канала
+
+Стрим обрывался на ~20 КБ: воркер читал ответ DeepSeek целиком (collect: 37052 Б
+за 1455 мс, [DONE]), но клиент получал 8–24 КБ и висел до RST на ~71 с
+(`TypeError: terminated`). Проверено на undici, curl и браузере, со сжатием и с
+`accept-encoding: identity` — дело не в клиенте.
+
+- `proxyStream` переписан на нативный `IdentityTransformStream` +
+  `await writer.write(...)`: кадр (в т.ч. `: ping`) уходит клиенту до чтения
+  следующего чанка upstream. Ручная pull-схема и enqueue из фонового цикла в
+  workerd не флашатся.
+- Новые диагностические маршруты без модели: `/api/diag/gen` (генератор,
+  `?whole=1`, `?bare=1`), `/api/diag/selfcheck`, `POST /api/diag/collect`
+  (воркер вычитывает DeepSeek и отдаёт байты/чанки/максимальную паузу).
+- `?raw=1` на `/api/chat/completions` — тот же ответ без обёртки, для сравнения.
+- `fakeUpstream` больше не переиспользует один ArrayBuffer (workerd его
+  «отсоединяет»), тест `scenarioBody` переведён на pull, как настоящий поток.
+- `scripts/test-worker.mjs`: 35 проверок, включая доставку 30 КБ потоком и
+  одним телом. Локальный `wrangler dev` отдаёт эти 30 КБ целиком, с
+  `*.workers.dev` — 24048 Б: режется канал (DPI/антивирус/прокси), это описано
+  в README и docs/SETUP.md вместе с вариантами решения.

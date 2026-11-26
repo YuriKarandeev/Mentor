@@ -9,6 +9,11 @@
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | живость, id версии деплоя и текущие лимиты стрима |
 | `GET` | `/api/diag/stream` | — | диагностический SSE-стрим с пингами (нужен `x-app-token`) |
+| `GET` | `/api/diag/burst` | — | тот же механизм стрима поверх фейкового быстрого upstream; `?raw=1` — без обёртки (нужен `x-app-token`) |
+| `GET` | `/api/diag/silent` | — | то же, но upstream молчит: проверка пингов без DeepSeek (нужен `x-app-token`) |
+| `GET` | `/api/diag/gen` | — | генератор без upstream: проверка, сколько байт вообще доходит до клиента (`?whole=1` — одним телом, `?bare=1` — без CORS) |
+| `GET` | `/api/diag/selfcheck` | — | воркер сам скачивает свой `/api/diag/gen` и возвращает счётчик байт |
+| `POST` | `/api/diag/collect` | `POST /chat/completions` | воркер сам вычитывает ответ DeepSeek и возвращает статистику (байты, чанки, максимальная пауза) |
 | `GET` | `/api/models` | `GET /models` | список моделей (кнопка «Проверить связь») |
 | `GET` | `/api/user/balance` | `GET /user/balance` | баланс аккаунта |
 | `POST` | `/api/chat/completions` | `POST /chat/completions` | чат, включая `stream: true` — ответ идёт потоком |
@@ -124,11 +129,17 @@ curl.exe -N -H "x-app-token: <APP_TOKEN>" "$w/api/diag/stream?seconds=30&ping=10
 `Promise.race([reader.read(), таймер на 10 с])`. При простое дольше 10 с в поток уходит
 комментарий `: ping`, поэтому Safari и промежуточные прокси не считают соединение мёртвым.
 
-Важно: `start(controller)` у потока **синхронный**, а чтение upstream живёт в фоновой задаче
-`pump`. Если сделать `async start` и ждать в нём `reader.read()`, workerd держит поток в
-состоянии «starting» и кадры, добавленные из таймеров, до клиента не доходят — именно так
-на проде терялись пинги, пока DeepSeek молчал (`/api/diag/stream` с синхронным `start`
-отдавал их нормально).
+Важно, как кадры попадают клиенту: только из `pull()` этого потока. `pump` наполняет
+очередь и отдаёт кадр в ожидающий `pull` (промис при этом ещё не разрешён), поэтому workerd
+видит новые данные при каждом чтении клиентом и флашит их. Если enqueue'ить из фонового
+цикла напрямую, workerd данные не отдаёт: на проде клиент получал 4845 Б из 30108 Б,
+воркер при этом писал `✔ стрим завершён`, а соединение висело до RST на ~71 с с
+`TypeError: terminated`. Проверялось тремя клиентами (undici, curl, браузер), со сжатием
+и с `accept-encoding: identity` — виноват был именно воркер, не клиент и не Cloudflare.
+
+`start()` у потока синхронный: если сделать `async start` и ждать в нём `reader.read()`,
+workerd держит поток в состоянии «starting» и кадры, добавленные из таймеров, до клиента
+не доходят — так на проде терялись пинги, пока DeepSeek молчал.
 
 Полный лимит на один стрим — 240 с, отдельно ограничено ожидание заголовков (60 с). Когда
 клиент закрывает вкладку или жмёт «Стоп», чтение upstream отменяется, чтобы не тратить токены.
@@ -147,6 +158,57 @@ curl.exe -N -H "x-app-token: <APP_TOKEN>" "$w/api/diag/stream?seconds=60&ping=10
 heartbeat не сработал, смотрите строки `[proxy] · ping …` в логах воркера.
 Если пинги приходят, а ответ DeepSeek всё равно обрывается на ~70 с — рвётся upstream
 (DeepSeek/веб-поиск), а не канал.
+
+Отдельно проверяется сам механизм стрима (без DeepSeek и без ключа модели):
+
+```powershell
+# быстрый поток: должно дойти ровно x-diag-expected-bytes (120 × 160 = 19200 Б)
+curl.exe -sS -D - -o NUL -H "x-app-token: <APP_TOKEN>" "$w/api/diag/burst?chunks=120&size=160"
+curl.exe -sS -H "x-app-token: <APP_TOKEN>" "$w/api/diag/burst?chunks=120&size=160" | Measure-Object -Character
+
+# тот же upstream без обёртки — для сравнения «обёртка или канал»
+curl.exe -sS -H "x-app-token: <APP_TOKEN>" "$w/api/diag/burst?chunks=120&size=160&raw=1" | Measure-Object -Character
+
+# молчащий upstream: пинг каждые 10 с, поток живёт 45 с
+curl.exe -N -H "x-app-token: <APP_TOKEN>" "$w/api/diag/silent?seconds=45"
+```
+
+Если `burst` возвращает меньше байт, чем в заголовке `x-diag-expected-bytes`, а `raw=1` —
+ровно столько, значит проблема в `proxyStream`, а не в канале.
+
+### Когда данные не доходят до клиента совсем
+
+Симптом: DeepSeek отдал ответ, воркер его прочитал, а клиент получил первые 8–24 КБ и
+висит до RST (`TypeError: terminated`). Проверяется тремя шагами — они отделяют код
+воркера от канала.
+
+```powershell
+# 1) сколько DeepSeek реально отдаёт (воркер вычитывает сам, без стрима клиенту)
+curl.exe -sS -H "x-app-token: <APP_TOKEN>" -H "content-type: application/json" `
+  -H "accept: text/event-stream" --data-binary "@body.json" `
+  "$w/api/diag/collect?seconds=90"
+# → {"bytes":37052,"chunks":110,"maxGapMs":383,"sawDone":true,...} — DeepSeek в порядке
+
+# 2) сколько байт доходит от воркера до клиента (без модели)
+curl.exe -sS -H "x-app-token: <APP_TOKEN>" -o NUL `
+  -w "%{http_code} %{size_download}" "$w/api/diag/gen?chunks=30&size=1000&whole=1"
+# → 200 30000 — канал в порядке; 200 24048 и обрыв — данные режет канал
+
+# 3) то же на локальном воркере, без Cloudflare
+cd worker; npx.cmd -y wrangler@latest dev    # APP_TOKEN=dev-token в worker/.dev.vars
+curl.exe -sS -H "x-app-token: dev-token" -o NUL `
+  -w "%{http_code} %{size_download}" "http://127.0.0.1:8787/api/diag/gen?chunks=30&size=1000&whole=1"
+```
+
+Если локально приходит 30000 Б, а с `*.workers.dev` — 24048 и обрыв, код воркера тут
+ни при чём: режется канал до `workers.dev` (DPI у провайдера, корпоративный прокси,
+антивирус с проверкой HTTPS). Признак именно канала: маленькие ответы (`/health`,
+`/api/diag/stream` с пингами) проходят, а всё больше ~20 КБ — нет. Что делать:
+
+- проверить с другой сети (мобильный интернет) — подтверждает диагноз за минуту;
+- перенести воркер на **свой домен** (Cloudflare → Workers → Settings → Domains & Routes →
+  Add custom domain): DPI обычно реагирует на `*.workers.dev`, а не на ваш домен;
+- либо поднять тот же прокси на другом хостинге (Deno Deploy, Vercel, VPS).
 
 Логика воркера проверяется офлайн, без деплоя и без ключей:
 
