@@ -7,7 +7,8 @@
 
 | Метод | Путь воркера | Путь в DeepSeek | Назначение |
 | --- | --- | --- | --- |
-| `GET` | `/health` | — | проверка живости воркера |
+| `GET` | `/health` | — | живость, id версии деплоя и текущие лимиты стрима |
+| `GET` | `/api/diag/stream` | — | диагностический SSE-стрим с пингами (нужен `x-app-token`) |
 | `GET` | `/api/models` | `GET /models` | список моделей (кнопка «Проверить связь») |
 | `GET` | `/api/user/balance` | `GET /user/balance` | баланс аккаунта |
 | `POST` | `/api/chat/completions` | `POST /chat/completions` | чат, включая `stream: true` — ответ идёт потоком |
@@ -41,6 +42,16 @@ npm.cmd run deploy           # = proxy:deploy: npx -y wrangler@latest deploy
 npm.cmd run tail             # = proxy:tail: npx -y wrangler@latest tail
 npm.cmd run proxy:deploy     # полный набор: proxy:login, proxy:dev, proxy:tail, proxy:secret:key, proxy:secret:token
 ```
+
+После деплоя проверьте, что на проде именно свежая версия (это быстрее и надёжнее `tail`):
+
+```powershell
+Invoke-RestMethod "https://nastavnik-deepseek-proxy.<workers-subdomain>.workers.dev/health" | ConvertTo-Json
+```
+
+`version` в ответе совпадает с `Current Version ID` из вывода `deploy`, `stream.limitMs` = `240000`,
+`stream.idlePingMs` = `10000`. Значение `null` в `version` значит, что биндинг `CF_VERSION_METADATA`
+не подхватился — передеплойте из каталога `worker/`.
 
 `wrangler deploy` выводит адрес вида `https://nastavnik-deepseek-proxy.<workers-subdomain>.workers.dev`.
 **Запомните имя своего workers.dev-поддомена** — оно задаётся один раз на аккаунт и попадает в каждый
@@ -82,9 +93,10 @@ npx.cmd -y wrangler@latest dev
 
 ```powershell
 $w = "https://nastavnik-deepseek-proxy.<workers-subdomain>.workers.dev"
-curl.exe -i "$w/health"                                                # 200 {"ok":true,...}
-curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/models"              # 200, список моделей
-curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/user/balance"        # 200, is_available
+curl.exe -i "$w/health"                                                       # 200 {"ok":true,"version":"...","stream":{...}}
+curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/models"                     # 200, список моделей
+curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/user/balance"               # 200, is_available
+curl.exe -N -H "x-app-token: <APP_TOKEN>" "$w/api/diag/stream?seconds=30&ping=10"  # пинг каждые 10 с
 ```
 
 В PowerShell 5.1 `curl` — это алиас `Invoke-WebRequest`, а не настоящий curl: используйте `curl.exe`.
@@ -101,14 +113,35 @@ curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/user/balance"        # 200, is
 | `[proxy] ← 200 за N мс (заголовки upstream, стрим)` | DeepSeek ответил заголовками — это и есть время до первого байта |
 | `[proxy] ✔ стрим завершён: N Б за M мс` | поток дошёл до конца |
 | `[proxy] ✖ стрим отменён клиентом: N Б за M мс` | поток закрыл клиент: сон экрана, мобильный Safari, кнопка «Стоп» |
+| `[proxy] ✖ чтение upstream прервано через M мс (N Б): terminated` | DeepSeek закрыл поток — клиент получает кадр `event: error`, а не «Load failed» |
 | `[proxy] ✖ стрим дольше 240 с — закрываю (N Б)` | сработал защитный лимит: клиент получит кадр `event: error` |
 | `[proxy] ✖ DeepSeek не ответил заголовками за 60000 мс` | ответ на запрос — `504`, стрим даже не начался |
 | `[proxy] ✖ upstream недоступен через N мс: …` | `fetch` к `api.deepseek.com` не удался |
 
-Воркер сам следит за живостью соединения: при простое дольше 10 с он отправляет в поток
+Воркер сам следит за живостью соединения: тело ответа DeepSeek читается явно
+(`new ReadableStream` + `reader.read()`), и при простое дольше 10 с в поток уходит
 комментарий `: ping`, поэтому Safari и промежуточные прокси не считают соединение мёртвым.
 Полный лимит на один стрим — 240 с, отдельно ограничено ожидание заголовков (60 с). Когда
 клиент закрывает вкладку или жмёт «Стоп», чтение upstream отменяется, чтобы не тратить токены.
+
+### Проверить канал отдельно от DeepSeek
+
+`GET /api/diag/stream?seconds=60&ping=10` отдаёт SSE-стрим с пингами и не обращается к модели:
+
+```powershell
+curl.exe -N -H "x-app-token: <APP_TOKEN>" "$w/api/diag/stream?seconds=60&ping=10"
+```
+
+Ожидаемо: `{"ok":true,"event":"start",…}`, затем `: ping` каждые 10 с, в конце
+`{"ok":true,"event":"end","elapsedMs":…}` и `data: [DONE]`. Если пинги приходят, а ответ
+DeepSeek всё равно обрывается на ~70 с — рвётся upstream (DeepSeek/веб-поиск), а не канал.
+
+Если `wrangler tail` циклически пишет `Tail connection lost: the Worker did not respond to a
+keep-alive ping within 10000ms` — это обрыв служебного WebSocket у CLI (VPN, мобильный NAT,
+антивирус с проверкой HTTPS), а не падение воркера: `/health` в это время отвечает `200`.
+Увеличить keep-alive у `tail` нельзя. Смотрите логи в дашборде: **Workers & Pages → воркер →
+Logs → Live** (не больше 10 клиентов одновременно) или **Workers Logs** — наблюдаемость
+включена (`[observability] enabled = true`), логи доступны и после инцидента.
 
 Секреты и тела запросов в логи не попадают. Повторить тот же запрос с компьютера и
 сравнить тайминги: `npm.cmd run probe:book` из корня репозитория (разбор — в

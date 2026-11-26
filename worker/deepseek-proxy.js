@@ -6,14 +6,17 @@
  *
  * Маршруты воркера (всё остальное — 404). Клиент ходит с префиксом /api,
  * а у DeepSeek маршруты без него — префикс срезается при проксировании:
- *   GET  /health               — проверка живости воркера (до DeepSeek не идёт)
+ *   GET  /health               — живость, id версии и текущие лимиты стрима (до DeepSeek не идёт)
+ *   GET  /api/diag/stream      — диагностический SSE-стрим с пингами (нужен x-app-token)
  *   GET  /api/models           → GET  /models
  *   GET  /api/user/balance     → GET  /user/balance
  *   POST /api/chat/completions → POST /chat/completions (в т.ч. stream: true, ответ идёт потоком)
  *
- * Диагностика: каждый запрос к /api/* пишет в лог (wrangler tail) время до
- * заголовков DeepSeek, статус upstream, объём и длительность стрима, а также
- * отдельную строку, если соединение закрыл клиент. Секреты в логи не попадают.
+ * Диагностика: каждый запрос к /api/* пишет в лог время до заголовков DeepSeek,
+ * статус upstream, объём и длительность стрима, причину обрыва чтения upstream
+ * и отдельную строку, если соединение закрыл клиент. Логи смотрите в дашборде
+ * Cloudflare (Workers & Pages → воркер → Logs) — `wrangler tail` за нестабильной
+ * сетью циклически переподключается. Секреты в логи не попадают.
  *
  * Секреты (wrangler secret put ...):
  *   DEEPSEEK_API_KEY — ключ DeepSeek (обязательно)
@@ -42,16 +45,24 @@ function sseErrorFrame(message) {
 }
 
 /**
- * Обёртка над телом ответа DeepSeek:
- * - считает байты для лога (видно объём и момент завершения);
+ * Поток ответа клиенту поверх тела ответа DeepSeek.
+ *
+ * Раньше тело шло через `pipeThrough(new TransformStream(...))`: пинги enqueue'ились
+ * в TransformStream, но на проде до клиента не доходили (probe:book показывал 4584 Б
+ * и 65 с тишины), а обрыв чтения upstream уходил в браузер как «Load failed».
+ * Поэтому читаем upstream явно — так видно причину обрыва в логах, а клиент
+ * получает кадр `event: error` вместо сетевой ошибки.
+ *
  * - в простое отправляет SSE-комментарий `: ping` — клиент его игнорирует,
  *   но Cloudflare и мобильный Safari не закрывают соединение по простою;
  * - при превышении STREAM_LIMIT_MS присылает понятную ошибку и закрывает поток;
- * - при отмене клиентом останавливает таймеры (чтение upstream отменяется само).
+ * - при отмене клиентом отменяет и чтение upstream (экономия токенов DeepSeek).
  */
-function keepAliveStream({ startedAt }) {
+function proxyStream(upstreamBody, { startedAt }) {
   let bytes = 0;
-  let finished = false;
+  let closed = false;
+  /** @type {ReadableStreamDefaultReader | null} */
+  let reader = null;
   let pingTimer = null;
   let limitTimer = null;
 
@@ -62,50 +73,84 @@ function keepAliveStream({ startedAt }) {
     limitTimer = null;
   };
 
-  return new TransformStream({
-    start(controller) {
+  /** Безопасная отправка кадра: поток мог закрыться со стороны клиента. */
+  const send = (controller, chunk) => {
+    try {
+      controller.enqueue(chunk);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  return new ReadableStream({
+    async start(controller) {
+      reader = upstreamBody.getReader();
+
       pingTimer = setInterval(() => {
-        if (finished) return;
-        try {
-          controller.enqueue(SSE_PING);
-        } catch {
-          stopTimers();
-        }
+        if (closed) return;
+        if (!send(controller, SSE_PING)) stopTimers();
       }, STREAM_IDLE_PING_MS);
 
       limitTimer = setTimeout(() => {
-        if (finished) return;
+        if (closed) return;
         const seconds = Math.round(STREAM_LIMIT_MS / 1000);
         console.log(`[proxy] ✖ стрим дольше ${seconds} с — закрываю (${bytes} Б)`);
+        closed = true;
+        stopTimers();
+        send(
+          controller,
+          sseErrorFrame(`Ответ идёт дольше ${seconds} с. Попробуйте ещё раз или уменьшите глубину размышлений.`)
+        );
         try {
-          controller.enqueue(
-            sseErrorFrame(`Ответ идёт дольше ${seconds} с. Попробуйте ещё раз или уменьшите глубину размышлений.`)
-          );
+          controller.close();
         } catch {
           /* поток уже закрыт */
         }
-        finished = true;
-        stopTimers();
-        try {
-          controller.terminate();
-        } catch {
-          /* terminate не поддерживается — поток закроется сам */
-        }
+        reader?.cancel()?.catch(() => {});
       }, STREAM_LIMIT_MS);
-    },
-    transform(chunk, controller) {
-      bytes += chunk.byteLength || 0;
-      controller.enqueue(chunk);
-    },
-    flush() {
-      finished = true;
-      stopTimers();
-      console.log(`[proxy] ✔ стрим завершён: ${bytes} Б за ${Date.now() - startedAt} мс`);
+
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value?.byteLength || 0;
+          controller.enqueue(value);
+        }
+        closed = true;
+        stopTimers();
+        console.log(`[proxy] ✔ стрим завершён: ${bytes} Б за ${Date.now() - startedAt} мс`);
+        try {
+          controller.close();
+        } catch {
+          /* поток уже закрыт */
+        }
+      } catch (err) {
+        stopTimers();
+        // Отмена клиентом уже залогирована в cancel() — здесь только реальные обрывы.
+        if (closed) return;
+        closed = true;
+        const message = err instanceof Error ? err.message : String(err);
+        console.log(`[proxy] ✖ чтение upstream прервано через ${Date.now() - startedAt} мс (${bytes} Б): ${message}`);
+        send(
+          controller,
+          sseErrorFrame(
+            `Соединение с DeepSeek прервалось (${message}). Повторите запрос — уже полученный текст сохранится как черновик.`
+          )
+        );
+        try {
+          controller.close();
+        } catch {
+          /* клиент уже ушёл */
+        }
+      }
     },
     cancel() {
-      finished = true;
+      if (closed) return;
+      closed = true;
       stopTimers();
       console.log(`[proxy] ✖ стрим отменён клиентом: ${bytes} Б за ${Date.now() - startedAt} мс`);
+      reader?.cancel()?.catch(() => {});
     }
   });
 }
@@ -152,7 +197,7 @@ function safeEqual(a, b) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    // Время от приёма запроса — по нему в `wrangler tail` видно, где копится задержка.
+    // Время от приёма запроса — по нему в логах воркера видно, где копится задержка.
     const startedAt = Date.now();
     const path = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
     const allowOrigin = pickOrigin(request, env);
@@ -162,11 +207,29 @@ export default {
     }
 
     if (path === '/' || path === '/health') {
-      return json({ ok: true, service: 'nastavnik-deepseek-proxy' }, 200, allowOrigin);
+      // Версия и лимиты в ответе: так видно, что на проде именно свежий деплой,
+      // без `wrangler tail` (id совпадает с `Current Version ID` из вывода deploy).
+      const version = env.CF_VERSION_METADATA;
+      return json(
+        {
+          ok: true,
+          service: 'nastavnik-deepseek-proxy',
+          version: version?.id ?? null,
+          tag: version?.tag ?? null,
+          deployedAt: version?.timestamp ?? null,
+          stream: {
+            headersTimeoutMs: HEADERS_TIMEOUT_MS,
+            idlePingMs: STREAM_IDLE_PING_MS,
+            limitMs: STREAM_LIMIT_MS
+          }
+        },
+        200,
+        allowOrigin
+      );
     }
 
     if (!path.startsWith('/api/')) {
-      return json({ error: 'Не найдено. Доступны /health и /api/*' }, 404, allowOrigin);
+      return json({ error: 'Не найдено. Доступны /health, /api/diag/stream и /api/*' }, 404, allowOrigin);
     }
 
     const expected = (env.APP_TOKEN || '').trim();
@@ -176,6 +239,69 @@ export default {
     const provided = (request.headers.get(TOKEN_HEADER) || '').trim();
     if (!safeEqual(provided, expected)) {
       return json({ error: 'Неверный или отсутствующий x-app-token' }, 401, allowOrigin);
+    }
+
+    // Диагностика канала: SSE-стрим с пингами, не зависящий от DeepSeek.
+    // Нужен, потому что главный подозреваемый в обрывах «Load failed» — простой
+    // соединения, пока модель ищет в вебе: `curl -N /api/diag/stream?seconds=60`
+    // должен приносить 8 Б каждые `ping` секунд (по умолчанию 10).
+    if (path === '/api/diag/stream') {
+      const seconds = Math.min(Math.max(Number(url.searchParams.get('seconds')) || 30, 2), 300);
+      const pingSeconds = Math.min(Math.max(Number(url.searchParams.get('ping')) || STREAM_IDLE_PING_MS / 1000, 1), 60);
+      const encoder = new TextEncoder();
+      const diagStartedAt = Date.now();
+      let sentBytes = 0;
+
+      const stream = new ReadableStream({
+        start(controller) {
+          const push = (text) => {
+            const chunk = encoder.encode(text);
+            sentBytes += chunk.byteLength;
+            controller.enqueue(chunk);
+          };
+          push(`data: ${JSON.stringify({ ok: true, event: 'start', seconds, pingSeconds })}\n\n`);
+
+          const pingTimer = setInterval(() => {
+            try {
+              sentBytes += SSE_PING.byteLength;
+              controller.enqueue(SSE_PING);
+            } catch {
+              clearInterval(pingTimer);
+            }
+          }, pingSeconds * 1000);
+
+          setTimeout(() => {
+            clearInterval(pingTimer);
+            try {
+              push(
+                `data: ${JSON.stringify({
+                  ok: true,
+                  event: 'end',
+                  elapsedMs: Date.now() - diagStartedAt,
+                  bytes: sentBytes
+                })}\n\ndata: [DONE]\n\n`
+              );
+              controller.close();
+            } catch {
+              /* клиент уже ушёл */
+            }
+            console.log(
+              `[proxy] diag/stream: ${seconds} с, пинг ${pingSeconds} с, ${sentBytes} Б за ${Date.now() - diagStartedAt} мс`
+            );
+          }, seconds * 1000);
+        }
+      });
+
+      console.log(`[proxy] → diag/stream на ${seconds} с (пинг ${pingSeconds} с)`);
+      return new Response(stream, {
+        status: 200,
+        headers: corsHeaders(allowOrigin, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-store',
+          // отключает буферизацию у промежуточных прокси — стрим идёт сразу
+          'x-accel-buffering': 'no'
+        })
+      });
     }
 
     const key = (env.DEEPSEEK_API_KEY || '').trim();
@@ -248,7 +374,7 @@ export default {
 
     let body = upstream.body;
     if (isStream && body) {
-      body = body.pipeThrough(keepAliveStream({ startedAt }));
+      body = proxyStream(body, { startedAt });
     }
 
     return new Response(body, { status: upstream.status, headers: resHeaders });
