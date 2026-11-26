@@ -12,6 +12,7 @@ const check = (ok, message) => {
 };
 
 const model = await import(pathToFileURL(path.resolve('src/lib/sync/model.ts')).href);
+const plainValue = await import(pathToFileURL(path.resolve('src/lib/utils/plain.ts')).href);
 
 const topic = {
   id: 't_1',
@@ -198,6 +199,71 @@ check(
 check(
   errors.rulesConsoleUrl(' ').startsWith('https://console.firebase.google.com/'),
   'без projectId ссылка ведёт на общую консоль'
+);
+
+/* --- настройки: снятие прокси Svelte перед записью в IndexedDB --- */
+
+/** Имитация глубокого прокси `$state` из Svelte 5. */
+function deepProxy(value) {
+  if (!value || typeof value !== 'object') return value;
+  return new Proxy(value, {
+    get(target, key) {
+      return deepProxy(Reflect.get(target, key));
+    }
+  });
+}
+
+const reactiveSettings = deepProxy({
+  proxyUrl: 'https://proxy.example.workers.dev',
+  appToken: 'secret-token',
+  model: 'deepseek-flash',
+  effort: 'high',
+  webSearch: true,
+  theme: 'auto',
+  tags: ['a', 'b']
+});
+
+let proxyCloneFailed = false;
+try {
+  structuredClone(reactiveSettings);
+} catch {
+  proxyCloneFailed = true;
+}
+check(proxyCloneFailed, 'клон прокси из $state падает — это и была причина потери настроек');
+
+let storedSettings = null;
+try {
+  storedSettings = structuredClone(plainValue.toPlainValue(reactiveSettings));
+} catch {
+  storedSettings = null;
+}
+check(storedSettings !== null, 'toPlainValue делает настройки пригодными для IndexedDB');
+check(
+  storedSettings?.proxyUrl === 'https://proxy.example.workers.dev',
+  'адрес прокси не теряется при снятии прокси'
+);
+check(storedSettings?.appToken === 'secret-token', 'токен приложения не теряется при снятии прокси');
+check(
+  Array.isArray(storedSettings?.tags) && storedSettings.tags.length === 2,
+  'массив внутри настроек остаётся массивом'
+);
+
+const withUndefined = plainValue.toPlainValue(deepProxy({ name: 'Аня', occupation: undefined }));
+check(
+  'occupation' in withUndefined && withUndefined.occupation === undefined,
+  'undefined-поле профиля не исчезает при снятии прокси'
+);
+
+const scalars = plainValue.toPlainValue(deepProxy({ n: 0, b: false, s: '', z: null }));
+check(
+  scalars.n === 0 && scalars.b === false && scalars.s === '' && scalars.z === null,
+  'примитивы, пустая строка и null не меняются'
+);
+
+check(plainValue.toPlainValue({ at: new Date(1700000000000) }).at instanceof Date, 'Date остаётся датой');
+check(
+  Array.isArray(plainValue.toPlainValue(deepProxy(['x', 'y']))),
+  'массив на верхнем уровне не превращается в объект'
 );
 
 if (failures.length > 0) {

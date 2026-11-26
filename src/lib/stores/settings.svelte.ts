@@ -14,7 +14,8 @@ class SettingsStore {
 
   async patch(patch: Partial<AppSettings>): Promise<void> {
     this.data = { ...this.data, ...patch };
-    await setKv(KEY, this.data);
+    // $state.snapshot снимает прокси Svelte: IndexedDB такие объекты не клонирует.
+    await setKv(KEY, $state.snapshot(this.data));
   }
 
   get configured(): boolean {

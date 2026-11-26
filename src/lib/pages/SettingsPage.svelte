@@ -157,16 +157,25 @@
     };
   });
 
+  /** Текст исключения для тоста: одинаково для сохранения и проверки связи. */
+  function errorText(e: unknown): string {
+    return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
+  }
+
   async function saveSettings(): Promise<void> {
-    await settings.patch({
-      proxyUrl: form.proxyUrl.trim(),
-      appToken: form.appToken.trim(),
-      model: form.model,
-      effort: form.effort,
-      webSearch: form.webSearch,
-      theme: form.theme
-    });
-    toasts.success('Настройки сохранены');
+    try {
+      await settings.patch({
+        proxyUrl: form.proxyUrl.trim(),
+        appToken: form.appToken.trim(),
+        model: form.model,
+        effort: form.effort,
+        webSearch: form.webSearch,
+        theme: form.theme
+      });
+      toasts.success('Настройки сохранены');
+    } catch (e) {
+      toasts.error(`Не удалось сохранить настройки: ${errorText(e)}`);
+    }
   }
 
   async function check(): Promise<void> {
@@ -191,8 +200,7 @@
       }
       connOk = true;
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      connResult = `Ошибка: ${msg}`;
+      connResult = `Ошибка: ${errorText(e)}`;
     } finally {
       checking = false;
     }
@@ -206,15 +214,19 @@
   }
 
   async function saveProfile(): Promise<void> {
-    await profile.save({
-      name: prof.name.trim() || undefined,
-      occupation: prof.occupation.trim() || undefined,
-      level: prof.level || undefined,
-      goals: splitList(prof.goals),
-      interests: splitList(prof.interests),
-      preferredStyle: prof.preferredStyle.trim() || undefined
-    });
-    toasts.success('Профиль обновлён');
+    try {
+      await profile.save({
+        name: prof.name.trim() || undefined,
+        occupation: prof.occupation.trim() || undefined,
+        level: prof.level || undefined,
+        goals: splitList(prof.goals),
+        interests: splitList(prof.interests),
+        preferredStyle: prof.preferredStyle.trim() || undefined
+      });
+      toasts.success('Профиль обновлён');
+    } catch (e) {
+      toasts.error(`Не удалось сохранить профиль: ${errorText(e)}`);
+    }
   }
 
   async function exportData(): Promise<void> {

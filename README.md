@@ -106,8 +106,9 @@ src/
       tools.ts             схемы инструментов (zod): save_plan, update_profile + веб-инструменты
       types.ts             типы ответов API
     db/db.ts               Dexie v2: topics, plans, messages, notes, memory, kv, tombstones (+ updatedAt/dirty)
-    sync/                  синхронизация: config, firebase (ленивый SDK), model (чистые функции), engine, state
-    stores/                settings, profile, toast (runes + localStorage)
+    utils/                 ids, format, markdown, plain (снимает прокси $state перед записью в IndexedDB)
+    sync/                  синхронизация: config, firebase (ленивый SDK), model (чистые функции), engine, errors, state
+    stores/                settings, profile, toast (runes; данные — в IndexedDB, kv)
     components/            Markdown, MessageBubble, Composer, PlanView, Toasts
     pages/                 Topics, NewTopic, Topic, Library, Settings
 worker/                    Cloudflare Worker — прокси DeepSeek

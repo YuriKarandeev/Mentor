@@ -1,6 +1,7 @@
 import Dexie, { type Table, type Transaction } from 'dexie';
 import { notifyLocalChange } from '../sync/signal';
 import { now, uid } from '../utils/ids';
+import { toPlainValue } from '../utils/plain';
 
 export type Level = 'новичок' | 'средний' | 'продвинутый';
 export type ItemKind = 'theory' | 'practice' | 'check';
@@ -220,9 +221,13 @@ export async function getKv<T>(key: string, fallback: T): Promise<T> {
 /**
  * Запись в kv. `sync: true` помечает ключ к отправке в облако —
  * используйте только для profile, настройки устройства остаются локальными.
+ *
+ * Значение обязательно прогоняется через `toPlainValue`: IndexedDB клонирует
+ * данные структурным клонированием, а оно не принимает Proxy из `$state`
+ * (иначе `DataCloneError` и молчаливая потеря настроек).
  */
 export async function setKv(key: string, value: unknown, opts?: { sync?: boolean }): Promise<void> {
-  const row: KvRow = { key, value };
+  const row: KvRow = { key, value: toPlainValue(value) };
   if (opts?.sync) row.dirty = 1;
   await db.kv.put(row);
   if (opts?.sync) notifyLocalChange();

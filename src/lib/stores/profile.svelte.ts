@@ -14,7 +14,9 @@ class ProfileStore {
 
   async save(patch: Partial<Profile>): Promise<void> {
     this.data = { ...this.data, ...patch, updatedAt: Date.now() };
-    await setKv(KEY, this.data, { sync: true });
+    // $state.snapshot — глубокий снимок без прокси: иначе запись в IndexedDB
+    // падает с DataCloneError и профиль не сохраняется (в том числе в облако).
+    await setKv(KEY, $state.snapshot(this.data), { sync: true });
   }
 
   /** Слияние патча от модели: цели/интересы объединяем без дублей. */
