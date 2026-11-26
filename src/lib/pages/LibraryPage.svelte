@@ -1,7 +1,7 @@
 <script lang="ts">
   import Markdown from '../components/Markdown.svelte';
   import { bookMessages, streamTurn, webToolsSupported } from '../api/agent';
-  import { ApiError } from '../api/deepseek';
+  import { describeStreamError } from '../api/stream-error';
   import { addNote, db, removeNote as deleteNote, type Citation, type Note } from '../db/db';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
@@ -14,6 +14,7 @@
   let citations = $state<Citation[]>([]);
   let error = $state('');
   let notes = $state<Note[]>([]);
+  let savedDraft = $state(false);
   let abort: AbortController | null = null;
 
   async function load(): Promise<void> {
@@ -25,6 +26,20 @@
     sync.revision;
     void load();
   });
+
+  async function storeNote(title: string, md: string, cites: Citation[]): Promise<void> {
+    const n = await addNote({ title, md, source: 'book', tags: [], citations: cites });
+    notes = [n, ...notes];
+    savedDraft = true;
+  }
+
+  /** Сохраняет уже полученный текст, если стрим оборвался на середине. */
+  async function keepPartial(title: string): Promise<boolean> {
+    const draft = text.trim();
+    if (!draft) return false;
+    await storeNote(`${title} (черновик)`, draft, citations);
+    return true;
+  }
 
   async function generate(): Promise<void> {
     const q = query.trim();
@@ -45,12 +60,16 @@
     text = '';
     citations = [];
     error = '';
+    savedDraft = false;
     abort = new AbortController();
 
     try {
       const res = await streamTurn({
         settings: settings.data,
         messages: bookMessages(q),
+        // Разбор книги — самый длинный запрос: с низкой глубиной размышлений
+        // первый байт приходит раньше, а стрим реже упирается в таймауты.
+        effort: 'low',
         signal: abort.signal,
         handlers: {
           onDelta: (d) => {
@@ -64,20 +83,21 @@
 
       const finalText = (res.content || text).trim();
       if (finalText) {
-        const n = await addNote({
-          title: q,
-          md: finalText,
-          source: 'book',
-          tags: [],
-          citations: res.citations.length ? res.citations : citations
-        });
-        notes = [n, ...notes];
+        await storeNote(q, finalText, res.citations.length ? res.citations : citations);
         query = '';
-        toasts.success('Конспект сохранён в библиотеку');
+        if (res.interrupted) {
+          toasts.info('Ответ пришёл не до конца — конспект сохранён как черновик');
+        } else {
+          toasts.success('Конспект сохранён в библиотеку');
+        }
       }
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      error = msg;
+      // Частичный текст не выбрасываем: разбор книги — дорогой запрос.
+      const kept = await keepPartial(q);
+      error = describeStreamError(e, {
+        stage: text.trim() ? 'stream' : 'connect',
+        suffix: kept ? 'Черновик сохранён в библиотеку.' : ''
+      });
     } finally {
       busy = false;
       abort = null;
@@ -121,7 +141,7 @@
     <article class="card live">
       <div class="row-between" style="margin-bottom: 6px">
         <strong>{busy ? 'Готовлю конспект…' : 'Черновик конспекта'}</strong>
-        {#if !busy && text.trim()}
+        {#if !busy && savedDraft}
           <span class="chip chip-accent">сохранено</span>
         {/if}
       </div>

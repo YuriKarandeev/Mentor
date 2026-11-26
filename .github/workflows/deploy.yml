@@ -47,6 +47,9 @@ jobs:
       - name: Sync unit tests
         run: npm run test:sync
 
+      - name: Stream error tests
+        run: npm run test:stream
+
       - name: Generate PWA icons
         run: npm run icons
 

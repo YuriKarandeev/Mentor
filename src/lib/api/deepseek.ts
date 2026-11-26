@@ -1,5 +1,6 @@
 import type { Citation } from '../db/db';
 import type { Annotation, BalanceResponse, ChatResponse, ToolCall, Usage } from './types';
+import { FirstByteTimeoutError, RemoteStreamError } from './stream-error';
 
 export class ApiError extends Error {
   status: number;
@@ -128,6 +129,8 @@ export interface StreamResult {
   usage?: Usage;
   /** Заполняется, если запрос удался только в упрощённом виде (после HTTP 400). */
   fallback?: string;
+  /** `true` — поток закрылся без маркера `[DONE]`: текст мог обрезаться. */
+  interrupted?: boolean;
 }
 
 interface RawStreamChoice {
@@ -139,6 +142,31 @@ interface RawStreamChoice {
 interface RawStream {
   choices?: RawStreamChoice[];
   usage?: Usage;
+  /** Ошибка, которую прислал прокси/DeepSeek прямо в потоке. */
+  error?: unknown;
+}
+
+/** Сколько ждём первый байт (включая heartbeat-пинги прокси), прежде чем сообщить о таймауте. */
+const FIRST_BYTE_TIMEOUT_MS = 90_000;
+
+function describeRemoteError(error: unknown): string {
+  if (typeof error === 'string' && error) return error;
+  if (typeof error === 'object' && error !== null) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message) return message;
+  }
+  try {
+    const text = JSON.stringify(error);
+    if (typeof text === 'string' && text && text !== '{}') return text;
+  } catch {
+    /* циклические ссылки — вернём общий текст */
+  }
+  return 'ошибка без описания';
+}
+
+export interface StreamOptions {
+  /** Переопределение ожидания первого байта (нужно тестам и «быстрым» сценариям). */
+  firstByteTimeoutMs?: number;
 }
 
 /**
@@ -149,15 +177,51 @@ export async function chatStream(
   conn: Connection,
   body: Record<string, unknown>,
   handlers: StreamHandlers = {},
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: StreamOptions = {}
 ): Promise<StreamResult> {
-  const res = await fetch(endpoint(conn, '/api/chat/completions'), {
-    method: 'POST',
-    headers: { ...authHeaders(conn), accept: 'text/event-stream' },
-    body: JSON.stringify({ ...body, stream: true }),
-    signal
-  });
-  await ensureOk(res);
+  const firstByteTimeoutMs = options.firstByteTimeoutMs ?? FIRST_BYTE_TIMEOUT_MS;
+
+  // Свой контроллер нужен, чтобы оборвать запрос по нашему таймауту
+  // и при этом пробросить отмену из интерфейса («Стоп»).
+  const controller = new AbortController();
+  let firstByteTimedOut = false;
+  const timeoutId = setTimeout(() => {
+    firstByteTimedOut = true;
+    controller.abort();
+  }, firstByteTimeoutMs);
+  const onOuterAbort = (): void => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onOuterAbort);
+  }
+  const cleanup = (): void => {
+    clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', onOuterAbort);
+  };
+  const timeoutError = (): FirstByteTimeoutError =>
+    new FirstByteTimeoutError(Math.round(firstByteTimeoutMs / 1000));
+
+  let res: Response;
+  try {
+    res = await fetch(endpoint(conn, '/api/chat/completions'), {
+      method: 'POST',
+      headers: { ...authHeaders(conn), accept: 'text/event-stream' },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: controller.signal
+    });
+  } catch (e) {
+    cleanup();
+    if (firstByteTimedOut) throw timeoutError();
+    throw e;
+  }
+
+  try {
+    await ensureOk(res);
+  } catch (e) {
+    cleanup();
+    throw e;
+  }
 
   let content = '';
   let reasoning = '';
@@ -166,6 +230,7 @@ export async function chatStream(
 
   const reader = res.body?.getReader();
   if (!reader) {
+    cleanup();
     const text = await res.text();
     handlers.onDelta?.(text);
     return { content: text, reasoning, citations, usage };
@@ -185,6 +250,9 @@ export async function chatStream(
       json = JSON.parse(payload) as RawStream;
     } catch {
       return; // частичный/неизвестный кадр — игнорируем
+    }
+    if (json.error !== undefined && json.error !== null) {
+      throw new RemoteStreamError(describeRemoteError(json.error));
     }
     if (json.usage) {
       usage = json.usage;
@@ -233,20 +301,32 @@ export async function chatStream(
     }
   };
 
-  while (!finished) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    drainLines();
-  }
-  if (!finished) drainLines(true);
-
+  let firstByteSeen = false;
   try {
-    await reader.cancel();
-  } catch {
-    /* поток уже закрыт */
+    while (!finished) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!firstByteSeen) {
+        firstByteSeen = true;
+        clearTimeout(timeoutId);
+      }
+      buffer += decoder.decode(value, { stream: true });
+      drainLines();
+    }
+    if (!finished) drainLines(true);
+  } catch (e) {
+    if (firstByteTimedOut) throw timeoutError();
+    throw e;
+  } finally {
+    cleanup();
+    try {
+      await reader.cancel();
+    } catch {
+      /* поток уже закрыт */
+    }
   }
 
-  return { content, reasoning, citations, usage };
+  // Без маркера [DONE] поток мог закрыться из-за обрыва: отдаём частичный текст и флаг.
+  return { content, reasoning, citations, usage, interrupted: !finished };
 }
 

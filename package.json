@@ -11,6 +11,7 @@
     "smoke": "node scripts/smoke.mjs",
     "icons": "node scripts/gen-icons.mjs",
     "test:sync": "node scripts/test-sync.mjs",
+    "test:stream": "node scripts/test-stream.mjs",
     "probe:book": "node scripts/probe-book.mjs"
   },
   "dependencies": {

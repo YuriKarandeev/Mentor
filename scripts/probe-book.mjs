@@ -9,7 +9,7 @@
  *
  * Запуск (PowerShell):
  *   $env:PROXY_URL="https://<worker>.workers.dev"; $env:APP_TOKEN="..."; npm.cmd run probe:book
- *   npm.cmd run probe:book -- --url https://... --token ... --effort low
+ *   npm.cmd run probe:book -- --url https://... --token ... --effort high
  *   npm.cmd run probe:book -- --dry-run          # только показать тело запроса
  *
  * Токен не печатается и никуда не сохраняется. Зависимостей нет.
@@ -51,7 +51,7 @@ function printHelp() {
 Необязательно:
   --query <текст>        что за книга (по умолчанию «Думай медленно… решай быстро, Канеман»)
   --model <id>           модель DeepSeek (по умолчанию deepseek-flash)
-  --effort <low|high|max> глубина размышлений (по умолчанию high, как в приложении)
+  --effort <low|high|max> глубина размышлений (по умолчанию low, как в приложении)
   --max-tokens <n>       лимит ответа (по умолчанию 8192)
   --no-tools             не подключать веб-поиск
   --no-thinking          не включать режим размышлений
@@ -79,7 +79,7 @@ const url = ((args.values.url || process.env.PROXY_URL || '').trim()).replace(/\
 const token = (args.values.token || process.env.APP_TOKEN || '').trim();
 const query = args.values.query || 'Думай медленно… решай быстро, Канеман';
 const model = args.values.model || 'deepseek-flash';
-const effort = args.values.effort || 'high';
+const effort = args.values.effort || 'low';
 const maxTokens = Number(args.values['max-tokens'] || 8192);
 const totalTimeoutSec = Number(args.values.timeout || 300);
 const firstByteTimeoutSec = Number(args.values['first-byte-timeout'] || 120);

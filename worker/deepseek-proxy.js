@@ -25,6 +25,91 @@
 const DEEPSEEK_BASE = 'https://api.deepseek.com';
 const TOKEN_HEADER = 'x-app-token';
 
+/** Сколько ждём заголовки DeepSeek, прежде чем ответить клиенту понятной ошибкой. */
+const HEADERS_TIMEOUT_MS = 60_000;
+/** Пинг в простое: держит SSE-соединение живым, пока модель думает или ищет в вебе. */
+const STREAM_IDLE_PING_MS = 10_000;
+/** Жёсткий предел длительности стрима — клиент не должен ждать бесконечно. */
+const STREAM_LIMIT_MS = 240_000;
+
+const SSE_PING = new TextEncoder().encode(': ping\n\n');
+
+/** Кадр SSE с ошибкой: клиент покажет текст, а не «Load failed». */
+function sseErrorFrame(message) {
+  return new TextEncoder().encode(
+    `event: error\ndata: ${JSON.stringify({ error: { message } })}\n\ndata: [DONE]\n\n`
+  );
+}
+
+/**
+ * Обёртка над телом ответа DeepSeek:
+ * - считает байты для лога (видно объём и момент завершения);
+ * - в простое отправляет SSE-комментарий `: ping` — клиент его игнорирует,
+ *   но Cloudflare и мобильный Safari не закрывают соединение по простою;
+ * - при превышении STREAM_LIMIT_MS присылает понятную ошибку и закрывает поток;
+ * - при отмене клиентом останавливает таймеры (чтение upstream отменяется само).
+ */
+function keepAliveStream({ startedAt }) {
+  let bytes = 0;
+  let finished = false;
+  let pingTimer = null;
+  let limitTimer = null;
+
+  const stopTimers = () => {
+    if (pingTimer !== null) clearInterval(pingTimer);
+    if (limitTimer !== null) clearTimeout(limitTimer);
+    pingTimer = null;
+    limitTimer = null;
+  };
+
+  return new TransformStream({
+    start(controller) {
+      pingTimer = setInterval(() => {
+        if (finished) return;
+        try {
+          controller.enqueue(SSE_PING);
+        } catch {
+          stopTimers();
+        }
+      }, STREAM_IDLE_PING_MS);
+
+      limitTimer = setTimeout(() => {
+        if (finished) return;
+        const seconds = Math.round(STREAM_LIMIT_MS / 1000);
+        console.log(`[proxy] ✖ стрим дольше ${seconds} с — закрываю (${bytes} Б)`);
+        try {
+          controller.enqueue(
+            sseErrorFrame(`Ответ идёт дольше ${seconds} с. Попробуйте ещё раз или уменьшите глубину размышлений.`)
+          );
+        } catch {
+          /* поток уже закрыт */
+        }
+        finished = true;
+        stopTimers();
+        try {
+          controller.terminate();
+        } catch {
+          /* terminate не поддерживается — поток закроется сам */
+        }
+      }, STREAM_LIMIT_MS);
+    },
+    transform(chunk, controller) {
+      bytes += chunk.byteLength || 0;
+      controller.enqueue(chunk);
+    },
+    flush() {
+      finished = true;
+      stopTimers();
+      console.log(`[proxy] ✔ стрим завершён: ${bytes} Б за ${Date.now() - startedAt} мс`);
+    },
+    cancel() {
+      finished = true;
+      stopTimers();
+      console.log(`[proxy] ✖ стрим отменён клиентом: ${bytes} Б за ${Date.now() - startedAt} мс`);
+    }
+  });
+}
+
 function corsHeaders(allowOrigin, extra = {}) {
   return {
     'access-control-allow-origin': allowOrigin,
@@ -118,20 +203,37 @@ export default {
     const isStream = (request.headers.get('accept') || '').includes('text/event-stream');
 
     console.log(`[proxy] → ${request.method} ${upstreamPath}${isStream ? ' · stream' : ''}`);
-    if (request.signal) {
-      request.signal.addEventListener('abort', () => {
-        console.log(`[proxy] ✖ клиент закрыл соединение через ${Date.now() - startedAt} мс`);
-      });
-    }
+
+    // Отмена клиентом должна прекращать и запрос к DeepSeek (экономия токенов),
+    // а молчание DeepSeek дольше HEADERS_TIMEOUT_MS — не превращаться в вечное ожидание.
+    const gateway = new AbortController();
+    let headersTimedOut = false;
+    const abortGateway = () => gateway.abort();
+    request.signal?.addEventListener('abort', abortGateway);
+    const headersTimer = setTimeout(() => {
+      headersTimedOut = true;
+      gateway.abort();
+    }, HEADERS_TIMEOUT_MS);
+    init.signal = gateway.signal;
 
     let upstream;
     try {
       upstream = await fetch(target, init);
     } catch (err) {
+      clearTimeout(headersTimer);
       const message = err instanceof Error ? err.message : String(err);
+      if (headersTimedOut) {
+        console.log(`[proxy] ✖ DeepSeek не ответил заголовками за ${HEADERS_TIMEOUT_MS} мс`);
+        return json(
+          { error: `DeepSeek не ответил за ${Math.round(HEADERS_TIMEOUT_MS / 1000)} с. Проверьте связь и повторите запрос.` },
+          504,
+          allowOrigin
+        );
+      }
       console.log(`[proxy] ✖ upstream недоступен через ${Date.now() - startedAt} мс: ${message}`);
       return json({ error: `Не удалось связаться с DeepSeek: ${message}` }, 502, allowOrigin);
     }
+    clearTimeout(headersTimer);
 
     console.log(
       `[proxy] ← ${upstream.status} за ${Date.now() - startedAt} мс (заголовки upstream${isStream ? ', стрим' : ''})`
@@ -144,23 +246,12 @@ export default {
       'x-accel-buffering': 'no'
     });
 
-    // Для стрима считаем байты: в логах видно объём и момент завершения.
     let body = upstream.body;
     if (isStream && body) {
-      let bytes = 0;
-      body = body.pipeThrough(
-        new TransformStream({
-          transform(chunk, controller) {
-            bytes += chunk.byteLength || 0;
-            controller.enqueue(chunk);
-          },
-          flush() {
-            console.log(`[proxy] ✔ стрим завершён: ${bytes} Б за ${Date.now() - startedAt} мс`);
-          }
-        })
-      );
+      body = body.pipeThrough(keepAliveStream({ startedAt }));
     }
 
     return new Response(body, { status: upstream.status, headers: resHeaders });
   }
 };
+

@@ -36,6 +36,7 @@ npm run dev        # http://localhost:5173
 ```powershell
 npm run check      # svelte-check (TS + Svelte)
 npm run test:sync  # проверки логики синхронизации (без Firebase)
+npm run test:stream # тексты ошибок стрима (без браузера и сети)
 npm run build      # dist/
 npm run smoke      # проверка собранного dist без запуска сервера
 npm run preview    # локальный просмотр сборки
@@ -65,7 +66,7 @@ npm run probe:book -- --help   # диагностика обрыва стрим�
 Живой адрес: **https://yurikarandeev.github.io/Mentor/**
 
 Workflow `.github/workflows/deploy.yml` собирает проект и публикует `dist` при пуше в `main`
-(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → иконки → `npm run build` → `npm run smoke`).
+(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → иконки → `npm run build` → `npm run smoke`).
 `BASE_PATH` подставляется автоматически: `/<repo>/`. Роутинг — hash-based, поэтому deep links
 работают без серверных rewrite-правил.
 

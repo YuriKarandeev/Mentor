@@ -9,7 +9,7 @@
     streamTurn,
     summarizeConversation
   } from '../api/agent';
-  import { ApiError } from '../api/deepseek';
+  import { describeStreamError } from '../api/stream-error';
   import {
     addMessage,
     addNote,
@@ -130,13 +130,32 @@
       messages = [...messages, saved];
       streamText = '';
       streamReasoning = '';
+      if (result.interrupted) {
+        toasts.info('Ответ пришёл не до конца — сохранил то, что успело прийти');
+      }
       void maybeUpdateMemory();
     } catch (e) {
+      const partial = streamText.trim();
       if ((e as Error)?.name === 'AbortError') {
-        streamError = 'Генерация остановлена.';
+        streamError = partial ? 'Генерация остановлена. Полученный текст сохранён.' : 'Генерация остановлена.';
       } else {
-        const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-        streamError = msg;
+        streamError = describeStreamError(e, {
+          stage: partial ? 'stream' : 'connect',
+          suffix: partial ? 'Полученный текст сохранён.' : ''
+        });
+      }
+      // Частичный ответ уже оплачен токенами — сохраняем его как сообщение.
+      if (partial) {
+        const saved = await addMessage({
+          topicId: t.id,
+          role: 'assistant',
+          content: partial,
+          reasoning: streamReasoning || undefined,
+          citations: streamCitations
+        });
+        messages = [...messages, saved];
+        streamText = '';
+        streamReasoning = '';
       }
     } finally {
       streaming = false;

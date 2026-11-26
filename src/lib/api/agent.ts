@@ -16,7 +16,7 @@ import {
   profilePatchSchema,
   type PlanArgs
 } from './tools';
-import type { AppSettings, Plan, Profile, Topic } from '../db/db';
+import type { AppSettings, Effort, Plan, Profile, Topic } from '../db/db';
 import type { ApiMessage, Usage } from './types';
 import { requestVariants, type RequestBody } from './request-variants';
 
@@ -25,8 +25,8 @@ export function connFrom(settings: AppSettings): Connection {
 }
 
 /** DeepSeek: thinking + reasoning_effort (low | high | max). */
-function thinkingBlock(settings: AppSettings): Record<string, unknown> {
-  return { thinking: { type: 'enabled' }, reasoning_effort: settings.effort };
+function thinkingBlock(settings: AppSettings, effort: Effort = settings.effort): Record<string, unknown> {
+  return { thinking: { type: 'enabled' }, reasoning_effort: effort };
 }
 
 /**
@@ -125,6 +125,10 @@ export interface StreamTurnOptions {
   tools?: unknown[];
   signal?: AbortSignal;
   handlers?: StreamHandlers;
+  /** Переопределение глубины размышлений (для книг — `low`: первый байт приходит раньше). */
+  effort?: Effort;
+  /** Переопределение ожидания первого байта. */
+  firstByteTimeoutMs?: number;
 }
 
 export async function streamTurn(opts: StreamTurnOptions): Promise<StreamResult> {
@@ -132,12 +136,14 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<StreamResult>
   const body: Record<string, unknown> = {
     model: opts.settings.model,
     messages: opts.messages,
-    ...thinkingBlock(opts.settings),
+    ...thinkingBlock(opts.settings, opts.effort),
     max_tokens: 8192
   };
   if (tools.length > 0) body.tools = tools;
   return withFallback(body, (variant) =>
-    chatStream(connFrom(opts.settings), variant, opts.handlers ?? {}, opts.signal)
+    chatStream(connFrom(opts.settings), variant, opts.handlers ?? {}, opts.signal, {
+      firstByteTimeoutMs: opts.firstByteTimeoutMs
+    })
   );
 }
 
