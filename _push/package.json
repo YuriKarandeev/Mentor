@@ -5,8 +5,7 @@
   "type": "module",
   "description": "Рассылка push-напоминаний из Firestore через GitHub Actions",
   "scripts": {
-    "send": "node send.mjs",
-    "dry-run": "node send.mjs"
+    "send": "node send.mjs"
   },
   "dependencies": {
     "firebase-admin": "^12.7.0",
