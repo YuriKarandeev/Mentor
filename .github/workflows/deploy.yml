@@ -53,6 +53,9 @@ jobs:
       - name: Connection mode tests
         run: npm run test:conn
 
+      - name: Plan note tests
+        run: npm run test:plan
+
       - name: Generate PWA icons
         run: npm run icons
 

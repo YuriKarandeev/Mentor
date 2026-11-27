@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Note } from '../db/db';
   import { formatDate } from '../utils/format';
+  import { PLAN_ITEM_TAG_PREFIX } from '../utils/plan-note';
   import Markdown from './Markdown.svelte';
 
   /**
@@ -30,8 +31,14 @@
   const bodyId = $derived(`note-body-${note.id}`);
   /** Заголовок может оказаться пустым (заметку начали с пустой строки). */
   const title = $derived(note.title.trim() || 'Без названия');
+  /** Конспект, собранный по заданию плана, помечаем отдельно от «из чата». */
+  const sourceLabel = $derived(
+    (note.tags ?? []).some((tag) => tag.startsWith(PLAN_ITEM_TAG_PREFIX))
+      ? 'по заданию плана'
+      : (SOURCE_LABEL[note.source] ?? note.source)
+  );
   const meta = $derived(
-    `${formatDate(note.createdAt)} · ${SOURCE_LABEL[note.source] ?? note.source} · ${note.md.length.toLocaleString('ru-RU')} симв.`
+    `${formatDate(note.createdAt)} · ${sourceLabel} · ${note.md.length.toLocaleString('ru-RU')} симв.`
   );
 </script>
 

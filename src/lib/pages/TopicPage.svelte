@@ -5,6 +5,7 @@
   import PlanView from '../components/PlanView.svelte';
   import {
     extractProfilePatch,
+    itemSummaryMessages,
     mentorMessages,
     streamTurn,
     summarizeConversation
@@ -21,9 +22,11 @@
     removeTopic as deleteTopic,
     setMemory,
     togglePlanItem,
+    updateNote,
     type Citation,
     type Note,
     type Plan,
+    type PlanItem,
     type StoredMessage,
     type Topic
   } from '../db/db';
@@ -33,6 +36,7 @@
   import { toasts } from '../stores/toast.svelte';
   import { sync } from '../sync/state.svelte';
   import { plainText } from '../utils/markdown';
+  import { findItemNote, findPlanItem, itemTag, summarisedItemIds } from '../utils/plan-note';
   import { untrack } from 'svelte';
 
   let { id, tab }: { id: string; tab: TopicTab } = $props();
@@ -58,6 +62,19 @@
   /** Тема, для которой сейчас показан список конспектов. */
   let lastTopicId = '';
 
+  /** Открытый пункт плана: под ним показывается конспект по заданию. */
+  let openItemId = $state<string | null>(null);
+  let itemText = $state('');
+  let itemCached = $state(false);
+  let itemBusy = $state(false);
+  let itemError = $state('');
+  let itemCitations = $state<Citation[]>([]);
+  /** Номер генерации: ответ отменённого запроса не должен трогать состояние. */
+  let itemRun = 0;
+  let itemAbort: AbortController | null = null;
+  /** Пункты, для которых конспект уже сохранён — в плане показываем метку. */
+  const summarised = $derived(summarisedItemIds(notes));
+
   $effect(() => {
     const topicId = id;
     // При переходе в другую тему список конспектов начинается свёрнутым:
@@ -65,11 +82,12 @@
     if (topicId !== lastTopicId) {
       lastTopicId = topicId;
       expandedIds = {};
+      closeItem();
     }
     // Перечитываем данные, когда синхронизация принесла чужие изменения,
     // но не во время стриминга ответа, чтобы не сбить генерацию.
     const revision = sync.revision;
-    if (revision > 0 && untrack(() => streaming)) return;
+    if (revision > 0 && untrack(() => streaming || itemBusy)) return;
     void loadAll(topicId);
   });
 
@@ -210,6 +228,146 @@
     if (updated) plan = { ...updated };
   }
 
+  /** Клик по заданию: раскрыть его конспект из кэша или собрать заново. */
+  async function openItem(itemId: string): Promise<void> {
+    if (openItemId === itemId) {
+      closeItem();
+      return;
+    }
+    if (!findPlanItem(plan, itemId)) return;
+    // Переключение на другой пункт останавливает текущую генерацию:
+    // иначе её текст дописывался бы в чужую карточку.
+    cancelItemRun();
+    openItemId = itemId;
+    itemError = '';
+    const cached = findItemNote(notes, itemId);
+    if (cached) {
+      itemText = cached.md;
+      itemCitations = cached.citations ?? [];
+      itemCached = true;
+      return;
+    }
+    itemText = '';
+    itemCitations = [];
+    itemCached = false;
+    await generateItem(itemId);
+  }
+
+  /** Генерация конспекта пункта: текст печатается по мере ответа модели. */
+  async function generateItem(itemId: string): Promise<void> {
+    const t = topic;
+    const p = plan;
+    if (!t || !p) return;
+    const target = findPlanItem(p, itemId);
+    if (!target) return;
+
+    cancelItemRun();
+    const run = ++itemRun;
+    itemBusy = true;
+    itemError = '';
+    itemText = '';
+    itemCached = false;
+    const controller = new AbortController();
+    itemAbort = controller;
+
+    try {
+      const result = await streamTurn({
+        settings: settings.data,
+        messages: itemSummaryMessages(t, p, target.module, target.item, profile.data),
+        signal: controller.signal,
+        handlers: {
+          onDelta: (d) => {
+            if (run === itemRun) itemText += d;
+          },
+          onCitations: (c) => {
+            if (run === itemRun) itemCitations = c;
+          }
+        }
+      });
+      if (run !== itemRun) return;
+
+      const md = (result.content || itemText).trim();
+      if (!md) {
+        itemError = 'Модель вернула пустой конспект. Попробуйте пересобрать.';
+        return;
+      }
+      const cites = result.citations.length ? result.citations : itemCitations;
+      itemText = md;
+      itemCitations = cites;
+      await saveItemNote(target.item, md, cites);
+      itemCached = true;
+      if (result.interrupted) toasts.info('Конспект пришёл не до конца — сохранил как есть');
+    } catch (e) {
+      if (run !== itemRun) return;
+      if ((e as Error)?.name === 'AbortError') {
+        itemError = itemText.trim()
+          ? 'Генерация остановлена. Текст не сохранён — «Пересобрать» начнёт заново.'
+          : 'Генерация остановлена.';
+      } else {
+        itemError = describeStreamError(e, { stage: itemText ? 'stream' : 'connect' });
+      }
+    } finally {
+      if (run === itemRun) {
+        itemBusy = false;
+        itemAbort = null;
+      }
+    }
+  }
+
+  /** Конспект пункта живёт как заметка темы: повторная сборка её перезаписывает. */
+  async function saveItemNote(item: PlanItem, md: string, cites: Citation[]): Promise<void> {
+    const t = topic;
+    if (!t) return;
+    const existing = findItemNote(notes, item.id);
+    if (existing) {
+      const updated = await updateNote(existing.id, {
+        title: item.title,
+        md,
+        citations: cites.length ? cites : existing.citations
+      });
+      if (updated) {
+        notes = notes.map((n) => (n.id === updated.id ? updated : n));
+        expandedIds[updated.id] = true;
+      }
+      return;
+    }
+    const created = await addNote({
+      topicId: t.id,
+      title: item.title,
+      md,
+      source: 'chat',
+      tags: [itemTag(item.id)],
+      citations: cites.length ? cites : undefined
+    });
+    notes = [created, ...notes];
+    expandedIds[created.id] = true;
+  }
+
+  function regenerateItem(): void {
+    if (openItemId) void generateItem(openItemId);
+  }
+
+  function stopItem(): void {
+    itemAbort?.abort();
+  }
+
+  /** Гасим текущую генерацию: старые колбэки больше не меняют состояние. */
+  function cancelItemRun(): void {
+    itemAbort?.abort();
+    itemAbort = null;
+    itemRun += 1;
+    itemBusy = false;
+  }
+
+  function closeItem(): void {
+    cancelItemRun();
+    openItemId = null;
+    itemText = '';
+    itemCitations = [];
+    itemError = '';
+    itemCached = false;
+  }
+
   async function saveLastAnswer(): Promise<void> {
     const last = [...messages].reverse().find((m) => m.role === 'assistant');
     if (!last || !topic) {
@@ -295,7 +453,21 @@
     {#if tab === 'plan'}
       {#if plan}
         <div class="card">
-          <PlanView {plan} onToggle={toggle} />
+          <PlanView
+            {plan}
+            onToggle={toggle}
+            {openItemId}
+            summaryIds={summarised}
+            onOpenItem={openItem}
+            {itemText}
+            {itemBusy}
+            {itemError}
+            {itemCached}
+            itemCitations={itemCitations}
+            onRegenerate={regenerateItem}
+            onStop={stopItem}
+            onClose={closeItem}
+          />
         </div>
       {:else}
         <div class="card empty">

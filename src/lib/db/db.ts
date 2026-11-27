@@ -413,12 +413,36 @@ export async function addNote(
     md: note.md,
     source: note.source,
     tags: note.tags ?? [],
-    citations: note.citations,
+    // Структурное клонирование IndexedDB не принимает Proxy из `$state`.
+    citations: note.citations ? toPlainValue(note.citations) : note.citations,
     createdAt: ts,
     updatedAt: ts,
     dirty: 1
   };
   await db.notes.add(row);
+  notifyLocalChange();
+  return row;
+}
+
+/**
+ * Обновление заметки на месте: используется, когда конспект пункта плана
+ * пересобирают — вместо дубля перезаписываем существующую запись.
+ */
+export async function updateNote(
+  noteId: string,
+  patch: Partial<Pick<Note, 'title' | 'md' | 'tags' | 'citations'>>
+): Promise<Note | undefined> {
+  const existing = await db.notes.get(noteId);
+  if (!existing) return undefined;
+  const row: Note = {
+    ...existing,
+    ...patch,
+    // Структурное клонирование IndexedDB не принимает Proxy из `$state`.
+    citations: patch.citations ? toPlainValue(patch.citations) : existing.citations,
+    updatedAt: now(),
+    dirty: 1
+  };
+  await db.notes.put(row);
   notifyLocalChange();
   return row;
 }

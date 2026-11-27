@@ -7,7 +7,7 @@ import {
   type StreamResult
 } from './deepseek';
 import { connectionOf, type Connection } from './conn';
-import { BOOK_SYSTEM, SUMMARY_SYSTEM, mentorSystem, plannerSystem } from './prompts';
+import { BOOK_SYSTEM, SUMMARY_SYSTEM, itemSummarySystem, mentorSystem, plannerSystem } from './prompts';
 import {
   SAVE_PLAN_TOOL,
   UPDATE_PROFILE_TOOL,
@@ -16,7 +16,7 @@ import {
   profilePatchSchema,
   type PlanArgs
 } from './tools';
-import type { AppSettings, Effort, Plan, Profile, Topic } from '../db/db';
+import type { AppSettings, Effort, Plan, PlanItem, PlanModule, Profile, Topic } from '../db/db';
 import type { ApiMessage, Usage } from './types';
 import { requestVariants, type RequestBody } from './request-variants';
 
@@ -226,5 +226,19 @@ export function bookMessages(query: string): ApiMessage[] {
   return [
     { role: 'system', content: BOOK_SYSTEM },
     { role: 'user', content: `Книга: ${query}` }
+  ];
+}
+
+/** Запрос конспекта одного пункта плана (открывается по клику на задание). */
+export function itemSummaryMessages(
+  topic: Topic,
+  plan: Plan,
+  module: PlanModule,
+  item: PlanItem,
+  profile?: Profile
+): ApiMessage[] {
+  return [
+    { role: 'system', content: itemSummarySystem(topic, plan, module, item, profile) },
+    { role: 'user', content: `Составь конспект для пункта «${item.title}».` }
   ];
 }

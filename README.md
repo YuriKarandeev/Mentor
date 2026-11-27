@@ -12,6 +12,10 @@ Cloudflare, тогда ключ остаётся на сервере: он пр�
 ## Возможности
 
 - **Темы и планы.** Форма «новая тема» → вопросы онбординга → инструмент `save_plan` собирает 3–6 модулей с пунктами и оценкой времени.
+  Клик по пункту (заданию) открывает конспект по нему: ИИ собирает материал под уровень и цель ученика
+  (суть, понятия, механика, пример, ошибки, практика, самопроверка) и сохраняет его конспектом темы.
+  Повторное открытие берёт текст из памяти устройства без запроса к модели, «Пересобрать» — обновляет,
+  чекбокс слева по-прежнему отмечает пункт выполненным.
 - **Чат с наставником.** Ответы стримятся, отдельно показываются рассуждения модели, цитаты из веб-поиска и кнопка «в заметки».
 - **Память.** Каждые ~5 реплик диалог сжимается в выжимку, которая подмешивается в системный промпт; профиль ученика обновляется через `update_profile`.
 - **Прогресс.** Отметки пунктов плана сохраняются, показывается пройденное время и доля выполнения.
@@ -41,6 +45,7 @@ npm run check      # svelte-check (TS + Svelte)
 npm run test:sync  # проверки логики синхронизации (без Firebase)
 npm run test:stream # тексты ошибок стрима (без браузера и сети)
 npm run test:conn  # прямой режим и прокси: пути, заголовки, сторож стрима
+npm run test:plan  # связка «пункт плана ↔ конспект» и промпт конспекта
 npm run build      # dist/
 npm run smoke      # проверка собранного dist без запуска сервера
 npm run preview    # локальный просмотр сборки
@@ -88,7 +93,7 @@ npm run probe:book -- --help   # диагностика обрыва стрим�
 Живой адрес: **https://yurikarandeev.github.io/Mentor/**
 
 Workflow `.github/workflows/deploy.yml` собирает проект и публикует `dist` при пуше в `main`
-(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → `npm run test:conn` → иконки → `npm run build` → `npm run smoke`).
+(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → `npm run test:conn` → `npm run test:plan` → иконки → `npm run build` → `npm run smoke`).
 `BASE_PATH` подставляется автоматически: `/<repo>/`. Роутинг — hash-based, поэтому deep links
 работают без серверных rewrite-правил.
 
@@ -127,21 +132,23 @@ src/
     api/
       conn.ts              выбор соединения: прямой ключ (api.deepseek.com) или прокси
       deepseek.ts          chatOnce / chatStream / listModels / getBalance, разбор SSE
-      agent.ts             сценарии: план, ход диалога, память, профиль, разбор книги
-      prompts.ts           системные промпты наставника, методиста, памяти
+      agent.ts             сценарии: план, ход диалога, память, профиль, разбор книги, конспект пункта
+      prompts.ts           системные промпты наставника, методиста, памяти, конспекта пункта
       tools.ts             схемы инструментов (zod): save_plan, update_profile + веб-инструменты
       types.ts             типы ответов API
     db/db.ts               Dexie v2: topics, plans, messages, notes, memory, kv, tombstones (+ updatedAt/dirty)
-    utils/                 ids, format, markdown, plain (снимает прокси $state перед записью в IndexedDB)
+    utils/                 ids, format, markdown, plain (снимает прокси $state перед записью в IndexedDB),
+                           plan-note (связка «пункт плана ↔ заметка-конспект» по тегу)
     sync/                  синхронизация: config, firebase (ленивый SDK), model (чистые функции), engine, errors, state
     stores/                settings, profile, toast (runes; данные — в IndexedDB, kv)
-    components/            Markdown, MessageBubble, Composer, PlanView, Toasts
+    components/            Markdown, MessageBubble, Composer, PlanView, ItemSummary, NoteCard, Toasts
     pages/                 Topics, NewTopic, Topic, Library, Settings
 worker/                    Cloudflare Worker — необязательный прокси DeepSeek
 firestore.rules            правила доступа к данным пользователя
 scripts/gen-icons.mjs      генератор PNG-иконок (zlib, без зависимостей)
 scripts/test-sync.mjs      проверки логики синхронизации без Firebase
 scripts/test-conn.mjs      прямой режим и прокси: пути, заголовки, сторож стрима
+scripts/test-plan-note.mjs связка «пункт плана ↔ конспект» и промпт конспекта
 ```
 
 ## Данные и приватность
