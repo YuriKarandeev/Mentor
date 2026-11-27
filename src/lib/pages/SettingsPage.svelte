@@ -260,9 +260,19 @@
     syncHint = '';
     syncFailed = false;
     try {
+      // Напоминания живут в Firestore, и без входа их никто не обновит:
+      // сначала снимаем подписку и чистим план, пока токен ещё действует.
+      const hadReminders = normalizeReminderSettings(settings.data.reminders).enabled;
+      if (hadReminders) {
+        await disableReminders().catch(() => undefined);
+        form.reminders = normalizeReminderSettings(settings.data.reminders);
+        reminderStatus = await readStatus();
+      }
       const { signOutSync } = await loadEngine();
       await signOutSync();
-      syncMessage = 'Вы вышли из аккаунта. Данные остались на устройстве.';
+      syncMessage = hadReminders
+        ? 'Вы вышли из аккаунта. Напоминания на этом устройстве выключены.'
+        : 'Вы вышли из аккаунта. Данные остались на устройстве.';
     } catch (e) {
       syncFailed = true;
       syncMessage = failText(e, 'auth');
