@@ -2,12 +2,20 @@
  * Чистые функции обмена с облаком: никакого Firebase и Dexie внутри,
  * поэтому модуль легко проверять отдельным скриптом (npm run test:sync).
  */
-import type { MemoryRow, Note, Plan, Profile, StoredMessage, Topic, Tombstone } from '../db/db';
+import type { MemoryRow, Note, Plan, PlannerEvent, Profile, StoredMessage, Topic, Tombstone } from '../db/db';
+import { AI_MAX_NOTES, AI_MAX_TITLE, text, validDate, validTime } from '../utils/planner.ts';
 
 /** Коллекции Firestore внутри users/{uid}. */
-export type SyncedCollection = 'topics' | 'plans' | 'messages' | 'notes' | 'memory';
+export type SyncedCollection = 'topics' | 'plans' | 'messages' | 'notes' | 'memory' | 'events';
 
-export const SYNCED_COLLECTIONS: SyncedCollection[] = ['topics', 'plans', 'messages', 'notes', 'memory'];
+export const SYNCED_COLLECTIONS: SyncedCollection[] = [
+  'topics',
+  'plans',
+  'messages',
+  'notes',
+  'memory',
+  'events'
+];
 
 export const COLLECTION_PROFILE = 'profile';
 export const PROFILE_DOC_ID = 'main';
@@ -36,6 +44,8 @@ export function collectionForTombstone(type: Tombstone['type']): string {
       return 'memory';
     case 'profile':
       return COLLECTION_PROFILE;
+    case 'event':
+      return 'events';
   }
 }
 
@@ -128,6 +138,44 @@ export function toRemoteMemory(row: MemoryRow): Record<string, unknown> {
     text: row.text,
     updatedAt: row.updatedAt,
     schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function toRemoteEvent(event: PlannerEvent): Record<string, unknown> {
+  return {
+    title: event.title,
+    date: event.date,
+    time: event.time,
+    endTime: event.endTime,
+    allDay: event.allDay,
+    notes: event.notes,
+    createdAt: event.createdAt,
+    updatedAt: event.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+/**
+ * Документ облака → строка локальной базы. Дата и время прогоняются через
+ * валидаторы: битые значения из чужой версии клиента не должны появиться
+ * в календаре (движок пропускает записи без даты).
+ */
+export function fromRemoteEvent(id: string, data: Record<string, unknown>): PlannerEvent {
+  const updatedAt = pickUpdatedAt(data);
+  const time = validTime(data.time);
+  const allDay = data.allDay === true || !time;
+  const endTime = validTime(data.endTime);
+  return {
+    id,
+    title: text(data.title, AI_MAX_TITLE),
+    date: validDate(data.date),
+    time: allDay ? '' : time,
+    endTime: allDay || !endTime || endTime <= time ? '' : endTime,
+    allDay,
+    notes: text(data.notes, AI_MAX_NOTES),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
   };
 }
 

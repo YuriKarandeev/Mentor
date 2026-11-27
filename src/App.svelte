@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Toasts from './lib/components/Toasts.svelte';
+  import AssistantPage from './lib/pages/AssistantPage.svelte';
+  import CalendarPage from './lib/pages/CalendarPage.svelte';
   import LibraryPage from './lib/pages/LibraryPage.svelte';
   import NewTopicPage from './lib/pages/NewTopicPage.svelte';
   import SettingsPage from './lib/pages/SettingsPage.svelte';
@@ -16,7 +18,8 @@
 
   const NAV = [
     { path: '/', key: 'topics', label: 'Темы', icon: '📚' },
-    { path: '/new', key: 'new-topic', label: 'Новая', icon: '＋' },
+    { path: '/calendar', key: 'calendar', label: 'Календарь', icon: '🗓' },
+    { path: '/assistant', key: 'assistant', label: 'Помощник', icon: '🤖' },
     { path: '/library', key: 'library', label: 'Библиотека', icon: '📖' },
     { path: '/settings', key: 'settings', label: 'Настройки', icon: '⚙️' }
   ];
@@ -103,6 +106,10 @@
         <TopicsPage />
       {:else if route.name === 'new-topic'}
         <NewTopicPage />
+      {:else if route.name === 'calendar'}
+        <CalendarPage />
+      {:else if route.name === 'assistant'}
+        <AssistantPage />
       {:else if route.name === 'library'}
         <LibraryPage />
       {:else if route.name === 'settings'}

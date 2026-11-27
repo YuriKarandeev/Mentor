@@ -7,6 +7,8 @@ export type Route =
   | { name: 'topics' }
   | { name: 'new-topic' }
   | { name: 'topic'; id: string; tab: TopicTab }
+  | { name: 'calendar' }
+  | { name: 'assistant' }
   | { name: 'library' }
   | { name: 'settings' };
 
@@ -20,6 +22,8 @@ function parse(hash: string): Route {
   const head = parts[0] ?? '';
 
   if (head === 'new') return { name: 'new-topic' };
+  if (head === 'calendar') return { name: 'calendar' };
+  if (head === 'assistant') return { name: 'assistant' };
   if (head === 'library') return { name: 'library' };
   if (head === 'settings') return { name: 'settings' };
   if (head === 'topic' && parts[1]) {

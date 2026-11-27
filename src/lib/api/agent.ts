@@ -7,7 +7,15 @@ import {
   type StreamResult
 } from './deepseek';
 import { connectionOf, type Connection } from './conn';
-import { BOOK_SYSTEM, SUMMARY_SYSTEM, itemSummarySystem, mentorSystem, plannerSystem } from './prompts';
+import {
+  BOOK_SYSTEM,
+  SUMMARY_SYSTEM,
+  itemSummarySystem,
+  mentorSystem,
+  plannerAssistantSystem,
+  plannerSystem,
+  type PlannerPromptContext
+} from './prompts';
 import {
   SAVE_PLAN_TOOL,
   UPDATE_PROFILE_TOOL,
@@ -16,6 +24,7 @@ import {
   profilePatchSchema,
   type PlanArgs
 } from './tools';
+import { PLANNER_ACTIONS_TOOL, parsePlannerArgs } from './planner-tools';
 import type { AppSettings, Effort, Plan, PlanItem, PlanModule, Profile, Topic } from '../db/db';
 import type { ApiMessage, Usage } from './types';
 import { requestVariants, type RequestBody } from './request-variants';
@@ -241,4 +250,74 @@ export function itemSummaryMessages(
     { role: 'system', content: itemSummarySystem(topic, plan, module, item, profile) },
     { role: 'user', content: `Составь конспект для пункта «${item.title}».` }
   ];
+}
+
+/* ------------------------------------------------------------- календарь */
+
+export interface PlannerTurnOptions {
+  settings: AppSettings;
+  context: PlannerPromptContext;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  signal?: AbortSignal;
+}
+
+export interface PlannerTurnResult {
+  /** Текст для пользователя: из инструмента либо обычный ответ модели. */
+  reply: string;
+  /** Сырые действия — их разбирает `applyPlannerActions`. */
+  actions: unknown[];
+  /** Модель ответила текстом без вызова инструмента. */
+  plain: boolean;
+  /** Ошибка разбора аргументов: показываем, но ответ не теряем. */
+  error?: string;
+  usage?: Usage;
+}
+
+export function plannerMessages(
+  context: PlannerPromptContext,
+  history: Array<{ role: 'user' | 'assistant'; content: string }>
+): ApiMessage[] {
+  return [{ role: 'system', content: plannerAssistantSystem(context) }, ...toApiMessages(history, 16)];
+}
+
+/**
+ * Один ход помощника календаря. Используем `chatOnce`, а не стрим: действия
+ * приходят аргументами инструмента, и до полного JSON применять их нельзя —
+ * частично полученный `event.create` дал бы событие с обрезанным названием.
+ */
+export async function plannerTurn(opts: PlannerTurnOptions): Promise<PlannerTurnResult> {
+  const body: Record<string, unknown> = {
+    model: opts.settings.model,
+    messages: plannerMessages(opts.context, opts.history),
+    ...thinkingBlock(opts.settings),
+    tools: mergeTools(opts.settings, [PLANNER_ACTIONS_TOOL]),
+    max_tokens: 2048
+  };
+
+  const res = await withFallback(body, (variant) => chatOnce(connFrom(opts.settings), variant, opts.signal));
+  const call = res.toolCalls.find((t) => t.function?.name === 'planner_actions');
+
+  if (!call) {
+    const reply = res.content.trim();
+    if (!reply) throw new ApiError(0, 'Модель ничего не ответила. Повторите запрос.');
+    return { reply, actions: [], plain: true, usage: res.usage };
+  }
+
+  const parsed = parsePlannerArgs(call.function.arguments);
+  if (!parsed.ok) {
+    return {
+      reply: res.content.trim() || 'Не удалось разобрать действия — попробуйте переформулировать.',
+      actions: [],
+      plain: true,
+      error: parsed.error,
+      usage: res.usage
+    };
+  }
+
+  return {
+    reply: parsed.value.reply || res.content.trim(),
+    actions: parsed.value.actions,
+    plain: false,
+    usage: res.usage
+  };
 }

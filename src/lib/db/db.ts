@@ -3,6 +3,7 @@ import type { ConnMode } from '../api/conn';
 import { notifyLocalChange } from '../sync/signal';
 import { now, uid } from '../utils/ids';
 import { toPlainValue } from '../utils/plain';
+import { AI_MAX_NOTES, AI_MAX_TITLE, text, validDate, validTime } from '../utils/planner';
 
 export type Level = 'новичок' | 'средний' | 'продвинутый';
 export type ItemKind = 'theory' | 'practice' | 'check';
@@ -14,7 +15,7 @@ export type ThemeMode = 'auto' | 'light' | 'dark';
 export type DirtyFlag = 0 | 1;
 
 /** Сущности, которые зеркалятся в Firestore. */
-export type SyncEntity = 'topic' | 'plan' | 'message' | 'note' | 'memory' | 'profile';
+export type SyncEntity = 'topic' | 'plan' | 'message' | 'note' | 'memory' | 'profile' | 'event';
 
 /** Надгробие: удаление, которое ещё нужно протолкнуть в облако. */
 export interface Tombstone {
@@ -96,6 +97,26 @@ export interface Note {
   dirty: DirtyFlag;
 }
 
+/**
+ * Событие календаря. Дата и время хранятся строками, а не timestamp:
+ * «весь день» не имеет времени, а локальная дата «ГГГГ-ММ-ДД» не съезжает
+ * на день назад в часовых поясах западнее UTC.
+ */
+export interface PlannerEvent {
+  id: string;
+  title: string;
+  /** Локальная дата «ГГГГ-ММ-ДД». */
+  date: string;
+  /** «ЧЧ:ММ»; пустая строка — событие на весь день. */
+  time: string;
+  endTime: string;
+  allDay: boolean;
+  notes: string;
+  createdAt: number;
+  updatedAt: number;
+  dirty: DirtyFlag;
+}
+
 /** Сжатая память наставника по теме (раньше лежала в kv как memory:<id>). */
 export interface MemoryRow {
   topicId: string;
@@ -137,7 +158,7 @@ export interface KvRow {
 export const DEFAULT_PROFILE: Profile = { goals: [], interests: [], updatedAt: 0 };
 
 /** Версия схемы; растёт вместе с миграциями в StudyDB. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 function backfillV2(row: { createdAt?: number; updatedAt?: number; dirty?: DirtyFlag }, stamp: number): void {
   row.updatedAt = row.updatedAt ?? row.createdAt ?? stamp;
@@ -181,6 +202,7 @@ class StudyDB extends Dexie {
   messages!: Table<StoredMessage, string>;
   notes!: Table<Note, string>;
   memory!: Table<MemoryRow, string>;
+  events!: Table<PlannerEvent, string>;
   kv!: Table<KvRow, string>;
   tombstones!: Table<Tombstone, string>;
 
@@ -204,6 +226,11 @@ class StudyDB extends Dexie {
         tombstones: 'id, type, dirty'
       })
       .upgrade((tx) => migrateToV2(tx));
+
+    // v3: календарь. Новая таблица создаётся сама, данные v2 не трогаем.
+    this.version(3).stores({
+      events: 'id, date, updatedAt, dirty'
+    });
   }
 }
 
@@ -264,6 +291,7 @@ export async function countPending(): Promise<number> {
     db.messages.where('dirty').equals(1).count(),
     db.notes.where('dirty').equals(1).count(),
     db.memory.where('dirty').equals(1).count(),
+    db.events.where('dirty').equals(1).count(),
     db.kv.where('dirty').equals(1).count(),
     db.tombstones.where('dirty').equals(1).count()
   ]);
@@ -489,6 +517,135 @@ export async function removeTopic(topicId: string): Promise<void> {
   notifyLocalChange();
 }
 
+/* ---------------------------------------------------------------- календарь */
+
+export interface NewEventInput {
+  id?: string;
+  title: string;
+  date: string;
+  time?: string;
+  endTime?: string;
+  allDay?: boolean;
+  notes?: string;
+}
+
+/** Приводит событие к безопасному виду: без даты событие не существует. */
+function normalizeEventFields(input: {
+  title: string;
+  date: string;
+  time?: string;
+  endTime?: string;
+  allDay?: boolean;
+  notes?: string;
+}): Pick<PlannerEvent, 'title' | 'date' | 'time' | 'endTime' | 'allDay' | 'notes'> {
+  const title = text(input.title, AI_MAX_TITLE);
+  const date = validDate(input.date);
+  if (!title) throw new Error('У события должно быть название');
+  if (!date) throw new Error('У события должна быть корректная дата');
+  const time = validTime(input.time);
+  const allDay = input.allDay === true || !time;
+  const endTime = allDay ? '' : validTime(input.endTime);
+  return {
+    title,
+    date,
+    time: allDay ? '' : time,
+    endTime: endTime && endTime > time ? endTime : '',
+    allDay,
+    notes: text(input.notes, AI_MAX_NOTES)
+  };
+}
+
+export async function addEvent(input: NewEventInput): Promise<PlannerEvent> {
+  const ts = now();
+  const event: PlannerEvent = {
+    id: input.id ?? uid('ev'),
+    ...normalizeEventFields(input),
+    createdAt: ts,
+    updatedAt: ts,
+    dirty: 1
+  };
+  await db.events.add(event);
+  notifyLocalChange();
+  return event;
+}
+
+export async function updateEvent(
+  id: string,
+  patch: Partial<Pick<PlannerEvent, 'title' | 'date' | 'time' | 'endTime' | 'allDay' | 'notes'>>
+): Promise<PlannerEvent | undefined> {
+  const existing = await db.events.get(id);
+  if (!existing) return undefined;
+  const merged = normalizeEventFields({
+    title: patch.title ?? existing.title,
+    date: patch.date ?? existing.date,
+    time: patch.time ?? existing.time,
+    endTime: patch.endTime ?? existing.endTime,
+    allDay: patch.allDay ?? existing.allDay,
+    notes: patch.notes ?? existing.notes
+  });
+  const row: PlannerEvent = { ...existing, ...merged, updatedAt: now(), dirty: 1 };
+  await db.events.put(row);
+  notifyLocalChange();
+  return row;
+}
+
+/** Удаление события: локально + надгробие, чтобы не «воскресло» из облака. */
+export async function removeEvent(id: string): Promise<void> {
+  const ts = now();
+  await db.transaction('rw', [db.events, db.tombstones], async () => {
+    const event = await db.events.get(id);
+    await db.events.delete(id);
+    if (event) await db.tombstones.put(tombstoneOf('event', id, ts));
+  });
+  notifyLocalChange();
+}
+
+/** События за период включительно; границы — локальные даты «ГГГГ-ММ-ДД». */
+export async function eventsBetween(fromIso: string, toIso: string): Promise<PlannerEvent[]> {
+  const rows = await db.events.where('date').between(fromIso, toIso, true, true).toArray();
+  return rows.sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+}
+
+export async function allEvents(): Promise<PlannerEvent[]> {
+  const rows = await db.events.toArray();
+  return rows.sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+}
+
+/**
+ * Пачка изменений от ИИ или импорта: записать/удалить события одной транзакцией.
+ * `restore` снимает надгробия — это нужно кнопке «Отменить» после удаления.
+ */
+export async function applyEventChanges(changes: {
+  put: PlannerEvent[];
+  remove: string[];
+  restore?: string[];
+}): Promise<void> {
+  const ts = now();
+  await db.transaction('rw', [db.events, db.tombstones], async () => {
+    if (changes.put.length > 0) {
+      // Строки могут прийти из отмены: у них старый updatedAt и dirty = 0.
+      // Помечаем к отправке, иначе облако вернёт отменённую правку обратно.
+      await db.events.bulkPut(
+        changes.put.map((row) =>
+          toPlainValue({
+            ...row,
+            updatedAt: Math.max(row.updatedAt, ts),
+            dirty: 1
+          })
+        )
+      );
+    }
+    if (changes.remove.length > 0) {
+      await db.events.bulkDelete(changes.remove);
+      await db.tombstones.bulkPut(changes.remove.map((id) => tombstoneOf('event', id, ts)));
+    }
+    if (changes.restore && changes.restore.length > 0) {
+      await db.tombstones.bulkDelete(changes.restore.map((id) => `event:${id}`));
+    }
+  });
+  notifyLocalChange();
+}
+
 /**
  * Полная очистка устройства. Сначала создаются надгробия, поэтому при
  * включённой синхронизации данные удалятся и из облака.
@@ -497,13 +654,14 @@ export async function wipeAll(): Promise<void> {
   const ts = now();
   await db.transaction(
     'rw',
-    [db.topics, db.plans, db.messages, db.notes, db.memory, db.kv, db.tombstones],
+    [db.topics, db.plans, db.messages, db.notes, db.memory, db.events, db.kv, db.tombstones],
     async () => {
       const topicIds = (await db.topics.toCollection().primaryKeys()) as string[];
       const planIds = (await db.plans.toCollection().primaryKeys()) as string[];
       const messageIds = (await db.messages.toCollection().primaryKeys()) as string[];
       const noteIds = (await db.notes.toCollection().primaryKeys()) as string[];
       const memoryIds = (await db.memory.toCollection().primaryKeys()) as string[];
+      const eventIds = (await db.events.toCollection().primaryKeys()) as string[];
       const hasProfile = Boolean(await db.kv.get('profile'));
 
       const rows: Tombstone[] = [
@@ -511,7 +669,8 @@ export async function wipeAll(): Promise<void> {
         ...planIds.map((id) => tombstoneOf('plan', id, ts)),
         ...messageIds.map((id) => tombstoneOf('message', id, ts)),
         ...noteIds.map((id) => tombstoneOf('note', id, ts)),
-        ...memoryIds.map((id) => tombstoneOf('memory', id, ts))
+        ...memoryIds.map((id) => tombstoneOf('memory', id, ts)),
+        ...eventIds.map((id) => tombstoneOf('event', id, ts))
       ];
       if (hasProfile) rows.push(tombstoneOf('profile', 'main', ts));
       if (rows.length > 0) await db.tombstones.bulkPut(rows);
@@ -521,6 +680,7 @@ export async function wipeAll(): Promise<void> {
       await db.messages.clear();
       await db.notes.clear();
       await db.memory.clear();
+      await db.events.clear();
 
       // Служебные ключи синхронизации (курсоры, авто-режим) сохраняем:
       // иначе следующий pull с нуля вернёт удалённое из облака.

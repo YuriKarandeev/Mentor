@@ -142,9 +142,43 @@ check(chunks.length === 3 && chunks[2].length === 100, 'чанкование р�
 check(model.chunk([], 10).length === 0, 'пустой список не даёт батчей');
 
 check(
-  model.SYNCED_COLLECTIONS.length === 5 && !model.SYNCED_COLLECTIONS.includes('kv'),
-  'в облако синхронизируются только данные, но не таблица настроек kv'
+  model.SYNCED_COLLECTIONS.length === 6 &&
+    ['topics', 'plans', 'messages', 'notes', 'memory', 'events'].every((name) =>
+      model.SYNCED_COLLECTIONS.includes(name)
+    ) &&
+    !model.SYNCED_COLLECTIONS.includes('kv'),
+  'в облако синхронизируются только данные (включая события), но не таблица настроек kv'
 );
+
+/* --- события календаря --- */
+
+const eventRow = {
+  id: 'ev_1',
+  title: 'Занятие по SQL',
+  date: '2026-11-27',
+  time: '18:00',
+  endTime: '19:30',
+  allDay: false,
+  notes: 'глава 3',
+  createdAt: 1000,
+  updatedAt: 2000,
+  dirty: 1
+};
+const remoteEvent = model.toRemoteEvent(eventRow);
+check(!('dirty' in remoteEvent) && remoteEvent.date === '2026-11-27', 'событие уходит в облако без dirty');
+check(remoteEvent.schemaVersion === model.CLOUD_SCHEMA_VERSION, 'у события есть версия схемы облака');
+
+const restored = model.fromRemoteEvent('ev_1', {
+  ...remoteEvent,
+  srvUpdatedAt: { seconds: 1 }
+});
+check(restored.id === 'ev_1' && restored.dirty === 0 && restored.updatedAt === 2000, 'событие из облака приходит без dirty');
+check(restored.time === '18:00' && restored.endTime === '19:30', 'время события сохраняется');
+const brokenEvent = model.fromRemoteEvent('ev_2', { title: 'x', date: '2026-02-30', updatedAt: 5 });
+check(brokenEvent.date === '', 'событие с 30 февраля не получает дату — движок его пропустит');
+const allDayEvent = model.fromRemoteEvent('ev_3', { title: 'x', date: '2026-11-28', time: '10:00', allDay: true, updatedAt: 5 });
+check(allDayEvent.allDay && allDayEvent.time === '', 'allDay из облака очищает время');
+check(model.collectionForTombstone('event') === 'events', 'надгробие события указывает на коллекцию events');
 
 const messy = {
   id: 'm_1',

@@ -36,8 +36,13 @@ users/{uid}/
   messages/{msgId}     { topicId, role, content, reasoning, citations[], createdAt, updatedAt, srvUpdatedAt }
   notes/{noteId}       { topicId, title, md, source, tags[], citations[], createdAt, updatedAt, srvUpdatedAt }
   memory/{topicId}     { text, updatedAt, srvUpdatedAt }
+  events/{eventId}     { title, date, time, endTime, allDay, notes, createdAt, updatedAt, srvUpdatedAt }
   tombstones/{type:id} { type, refId, deletedAt, origin, srvUpdatedAt }
 ```
+
+События календаря живут отдельной коллекцией: они не привязаны к теме, поэтому удаление темы
+их не затрагивает. Дата хранится строкой `ГГГГ-ММ-ДД` (локальный день пользователя), время —
+`ЧЧ:ММ`; «весь день» — пустое время и `allDay: true`.
 
 Правила доступа: только владелец (`request.auth.uid == uid`), всё остальное закрыто.
 `apiKey` в клиенте — не секрет; доступ ограничивают правила.

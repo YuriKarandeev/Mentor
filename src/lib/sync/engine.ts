@@ -34,11 +34,14 @@ import {
   PROFILE_DOC_ID,
   PULL_OVERLAP_MS,
   PULL_PAGE_SIZE,
+  SYNCED_COLLECTIONS,
   chunk,
   collectionForTombstone,
   docIdForTombstone,
+  fromRemoteEvent,
   pickUpdatedAt,
   shouldApply,
+  toRemoteEvent,
   toRemoteMemory,
   toRemoteMessage,
   toRemoteNote,
@@ -291,7 +294,9 @@ async function syncOnce(_reason: string): Promise<void> {
 
 async function pull(current: Ctx): Promise<number> {
   let applied = 0;
-  for (const name of ['topics', 'plans', 'messages', 'notes', 'memory'] as SyncedCollection[]) {
+  // Список коллекций — единый источник правды: новая сущность добавляется
+  // в SYNCED_COLLECTIONS и сразу участвует в pull и push.
+  for (const name of SYNCED_COLLECTIONS) {
     applied += await pullCollection(current, name);
   }
   applied += await pullProfile(current);
@@ -420,6 +425,15 @@ async function applyRemote(
       await db.memory.put(row);
       return true;
     }
+    case 'events': {
+      const row = fromRemoteEvent(id, data);
+      // Без валидной даты событие не показывается и не сохраняется.
+      if (!row.date) return false;
+      const local = await db.events.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.events.put(row);
+      return true;
+    }
   }
 }
 
@@ -533,6 +547,12 @@ async function applyTombstone(type: SyncEntity, refId: string, deletedAt: number
       await db.memory.delete(refId);
       return true;
     }
+    case 'event': {
+      const local = await db.events.get(refId);
+      if (!local || deletedAt < local.updatedAt) return false;
+      await db.events.delete(refId);
+      return true;
+    }
     case 'profile': {
       const row = await db.kv.get(PROFILE_KEY);
       const local = row?.value as Profile | undefined;
@@ -563,11 +583,9 @@ interface PushRow {
 
 async function push(current: Ctx): Promise<number> {
   let pushed = 0;
-  pushed += await pushCollection(current, 'topics');
-  pushed += await pushCollection(current, 'plans');
-  pushed += await pushCollection(current, 'messages');
-  pushed += await pushCollection(current, 'notes');
-  pushed += await pushCollection(current, 'memory');
+  for (const name of SYNCED_COLLECTIONS) {
+    pushed += await pushCollection(current, name);
+  }
   pushed += await pushProfile(current);
   pushed += await pushTombstones(current);
   return pushed;
@@ -602,6 +620,10 @@ async function collectDirty(name: SyncedCollection): Promise<PushRow[]> {
     case 'memory': {
       const rows = await db.memory.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
       return rows.map((row) => ({ id: row.topicId, updatedAt: row.updatedAt, payload: toRemoteMemory(row) }));
+    }
+    case 'events': {
+      const rows = await db.events.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteEvent(row) }));
     }
   }
 }
@@ -723,12 +745,14 @@ export async function wipeCloud(): Promise<void> {
   const messageIds = (await db.messages.toCollection().primaryKeys()) as string[];
   const noteIds = (await db.notes.toCollection().primaryKeys()) as string[];
   const memoryIds = (await db.memory.toCollection().primaryKeys()) as string[];
+  const eventIds = (await db.events.toCollection().primaryKeys()) as string[];
 
   rows.push(...topicIds.map((id) => tombstoneOf('topic', id, ts)));
   rows.push(...planIds.map((id) => tombstoneOf('plan', id, ts)));
   rows.push(...messageIds.map((id) => tombstoneOf('message', id, ts)));
   rows.push(...noteIds.map((id) => tombstoneOf('note', id, ts)));
   rows.push(...memoryIds.map((id) => tombstoneOf('memory', id, ts)));
+  rows.push(...eventIds.map((id) => tombstoneOf('event', id, ts)));
   if (await db.kv.get(PROFILE_KEY)) rows.push(tombstoneOf('profile', PROFILE_DOC_ID, ts));
 
   if (rows.length > 0) await db.tombstones.bulkPut(rows);

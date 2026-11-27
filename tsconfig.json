@@ -7,6 +7,9 @@
     "moduleResolution": "bundler",
     "strict": true,
     "noEmit": true,
+    // Чистые модули импортируются тестами прямо в Node (`node scripts/test-planner.mjs`),
+    // а Node ESM не угадывает расширение: там, где тест грузит модуль, путь пишется с `.ts`.
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "isolatedModules": true,

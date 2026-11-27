@@ -14,6 +14,7 @@
     "test:stream": "node scripts/test-stream.mjs",
     "test:conn": "node scripts/test-conn.mjs",
     "test:plan": "node scripts/test-plan-note.mjs",
+    "test:planner": "node scripts/test-planner.mjs",
     "test:worker": "node scripts/test-worker.mjs",
     "probe:book": "node scripts/probe-book.mjs"
   },

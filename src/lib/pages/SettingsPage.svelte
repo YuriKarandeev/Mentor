@@ -9,6 +9,7 @@
   import { sync } from '../sync/state.svelte';
   import { firebaseConfig } from '../sync/config';
   import { describeSyncError, rulesConsoleUrl, type SyncStep } from '../sync/errors';
+  import { importAssistantFileText } from '../sync/import-assistant';
   import { formatDate } from '../utils/format';
 
   const MODELS = ['deepseek-flash', 'deepseek-v4-pro'];
@@ -69,6 +70,11 @@
   let syncMessage = $state('');
   let syncHint = $state('');
   let syncFailed = $state(false);
+
+  /** Импорт календаря из «Ассистента»: статус под кнопкой. */
+  let assistantBusy = $state(false);
+  let assistantMessage = $state('');
+  let assistantFailed = $state(false);
 
   const loadEngine = () => import('../sync/engine');
 
@@ -257,13 +263,14 @@
 
   async function exportData(): Promise<void> {
     const payload = {
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
       topics: await db.topics.toArray(),
       plans: await db.plans.toArray(),
       messages: await db.messages.toArray(),
       notes: await db.notes.toArray(),
       memory: await db.memory.toArray(),
+      events: await db.events.toArray(),
       kv: await db.kv.toArray()
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -295,13 +302,14 @@
       const json = JSON.parse(await file.text()) as Record<string, unknown[]>;
       await db.transaction(
         'rw',
-        [db.topics, db.plans, db.messages, db.notes, db.memory, db.kv],
+        [db.topics, db.plans, db.messages, db.notes, db.memory, db.events, db.kv],
         async () => {
           if (Array.isArray(json.topics)) await db.topics.bulkPut(normalizeRows(json.topics));
           if (Array.isArray(json.plans)) await db.plans.bulkPut(normalizeRows(json.plans));
           if (Array.isArray(json.messages)) await db.messages.bulkPut(normalizeRows(json.messages));
           if (Array.isArray(json.notes)) await db.notes.bulkPut(normalizeRows(json.notes));
           if (Array.isArray(json.memory)) await db.memory.bulkPut(json.memory as never[]);
+          if (Array.isArray(json.events)) await db.events.bulkPut(normalizeRows(json.events));
           if (Array.isArray(json.kv)) {
             const rows = (json.kv as Array<Record<string, unknown>>).map((row) =>
               row.key === 'profile' ? { ...row, dirty: 1 } : row
@@ -314,6 +322,34 @@
     } catch {
       toasts.error('Не удалось прочитать файл резервной копии');
     } finally {
+      input.value = '';
+    }
+  }
+
+  /**
+   * Импорт календаря из «Ассистента»: принимает файл копии (`{ app, state }`)
+   * или «голое» состояние из localStorage. Повторный импорт не задваивает события.
+   */
+  async function importAssistant(e: Event): Promise<void> {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    assistantBusy = true;
+    assistantFailed = false;
+    assistantMessage = '';
+    try {
+      const result = await importAssistantFileText(await file.text());
+      const parts = [`Добавлено событий: ${result.created}`];
+      if (result.duplicates > 0) parts.push(`уже были: ${result.duplicates}`);
+      if (result.invalid > 0) parts.push(`пропущено без даты или названия: ${result.invalid}`);
+      assistantMessage = parts.join(' · ');
+      toasts.success(result.created > 0 ? 'Календарь «Ассистента» импортирован' : 'Новых событий нет');
+    } catch (err) {
+      assistantFailed = true;
+      assistantMessage = errorText(err);
+      toasts.error('Импорт не удался');
+    } finally {
+      assistantBusy = false;
       input.value = '';
     }
   }
@@ -559,9 +595,9 @@
       {/if}
 
       <p class="mute tiny">
-        В облако уходят темы, планы, чаты, конспекты, память и профиль. Ключ DeepSeek, токен прокси и
-        настройки устройства остаются только здесь. Конфликты решаются по времени изменения — при правке
-        одного пункта на двух устройствах останется последняя версия.
+        В облако уходят темы, планы, чаты, конспекты, память, события календаря и профиль. Ключ
+        DeepSeek, токен прокси и настройки устройства остаются только здесь. Конфликты решаются по
+        времени изменения — при правке одного пункта на двух устройствах останется последняя версия.
       </p>
     {:else}
       <p class="mute tiny">
@@ -577,6 +613,30 @@
           {#if syncFailed && syncHint}<div class="mute tiny">{syncHint}</div>{/if}
         </div>
       {/if}
+    {/if}
+  </section>
+
+  <section class="card col">
+    <h2>Переезд из «Ассистента»</h2>
+    <p class="mute tiny">
+      В «Ассистенте» откройте «Данные» → «Экспорт в JSON» и загрузите файл сюда: события календаря
+      переедут в этот календарь. Повторная загрузка того же файла ничего не задвоит, а записи без
+      настоящей даты будут пропущены.
+    </p>
+    <div class="row wrap">
+      <label class="btn btn-sm" style="margin: 0">
+        {assistantBusy ? 'Импортирую…' : 'Загрузить копию «Ассистента»'}
+        <input
+          type="file"
+          accept="application/json,.json"
+          onchange={importAssistant}
+          disabled={assistantBusy}
+          style="display: none"
+        />
+      </label>
+    </div>
+    {#if assistantMessage}
+      <div class={assistantFailed ? 'err' : 'ok'}>{assistantMessage}</div>
     {/if}
   </section>
 
