@@ -35,6 +35,7 @@ check(js.includes('Наставник'), 'в бандле есть строки 
 check(js.includes('deepseek'), 'в бандле есть клиент DeepSeek');
 check(js.includes('api.deepseek.com'), 'в бандле есть прямой адрес DeepSeek API');
 check(js.includes('Синхронизация'), 'в бандле есть раздел синхронизации');
+check(js.includes('Нажмите на название'), 'в бандле есть подсказка о раскрытии конспектов');
 
 const firebaseFiles = jsFiles.filter((f) =>
   fs.readFileSync(path.join(assetsDir, f), 'utf8').includes('firestore.googleapis.com')

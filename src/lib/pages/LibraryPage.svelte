@@ -1,12 +1,12 @@
 <script lang="ts">
   import Markdown from '../components/Markdown.svelte';
+  import NoteCard from '../components/NoteCard.svelte';
   import { bookMessages, streamTurn, webToolsSupported } from '../api/agent';
   import { describeStreamError } from '../api/stream-error';
   import { addNote, db, removeNote as deleteNote, type Citation, type Note } from '../db/db';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
   import { sync } from '../sync/state.svelte';
-  import { formatDate } from '../utils/format';
 
   let query = $state('');
   let busy = $state(false);
@@ -14,6 +14,8 @@
   let citations = $state<Citation[]>([]);
   let error = $state('');
   let notes = $state<Note[]>([]);
+  /** Раскрытые конспекты: по умолчанию все свёрнуты до названия. */
+  let expandedIds = $state<Record<string, boolean>>({});
   let savedDraft = $state(false);
   let abort: AbortController | null = null;
 
@@ -104,9 +106,14 @@
     }
   }
 
+  function toggleNote(id: string): void {
+    expandedIds[id] = !expandedIds[id];
+  }
+
   async function remove(id: string): Promise<void> {
     await deleteNote(id);
     notes = notes.filter((n) => n.id !== id);
+    delete expandedIds[id];
   }
 </script>
 
@@ -160,30 +167,18 @@
     </article>
   {/if}
 
-  <h2 class="sec">Сохранённые конспекты</h2>
+  <h2 class="sec">
+    Сохранённые конспекты{notes.length > 0 ? ` · ${notes.length}` : ''}
+  </h2>
 
   {#if notes.length === 0}
     <div class="empty">Здесь появятся разборы книг.</div>
+  {:else}
+    <p class="mute tiny hint">Нажмите на название, чтобы раскрыть разбор.</p>
   {/if}
 
   {#each notes as n (n.id)}
-    <article class="card">
-      <div class="row-between" style="margin-bottom: 8px">
-        <div>
-          <strong>{n.title}</strong>
-          <div class="mute tiny">{formatDate(n.createdAt)}</div>
-        </div>
-        <button class="btn btn-sm btn-ghost" onclick={() => remove(n.id)}>Удалить</button>
-      </div>
-      <Markdown md={n.md} />
-      {#if n.citations && n.citations.length > 0}
-        <ul class="cites">
-          {#each n.citations as c (c.url)}
-            <li><a href={c.url} target="_blank" rel="noreferrer noopener">{c.title || c.url}</a></li>
-          {/each}
-        </ul>
-      {/if}
-    </article>
+    <NoteCard note={n} open={!!expandedIds[n.id]} onToggle={() => toggleNote(n.id)} onRemove={() => remove(n.id)} />
   {/each}
 </div>
 
@@ -213,6 +208,10 @@
 
   .live {
     border-color: var(--accent);
+  }
+
+  .hint {
+    margin: 0;
   }
 
   .cites {

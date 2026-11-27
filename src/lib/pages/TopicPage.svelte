@@ -1,7 +1,7 @@
 <script lang="ts">
   import Composer from '../components/Composer.svelte';
-  import Markdown from '../components/Markdown.svelte';
   import MessageBubble from '../components/MessageBubble.svelte';
+  import NoteCard from '../components/NoteCard.svelte';
   import PlanView from '../components/PlanView.svelte';
   import {
     extractProfilePatch,
@@ -32,7 +32,6 @@
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
   import { sync } from '../sync/state.svelte';
-  import { formatDate } from '../utils/format';
   import { plainText } from '../utils/markdown';
   import { untrack } from 'svelte';
 
@@ -44,6 +43,8 @@
   let notes = $state<Note[]>([]);
   let memory = $state('');
   let loading = $state(true);
+  /** Раскрытые конспекты (по id): по умолчанию все свёрнуты до названия. */
+  let expandedIds = $state<Record<string, boolean>>({});
 
   let streaming = $state(false);
   let streamText = $state('');
@@ -54,9 +55,17 @@
   let thread = $state<HTMLDivElement | null>(null);
 
   let noteDraft = $state('');
+  /** Тема, для которой сейчас показан список конспектов. */
+  let lastTopicId = '';
 
   $effect(() => {
     const topicId = id;
+    // При переходе в другую тему список конспектов начинается свёрнутым:
+    // компонент не перемонтируется, поэтому состояние чистим руками.
+    if (topicId !== lastTopicId) {
+      lastTopicId = topicId;
+      expandedIds = {};
+    }
     // Перечитываем данные, когда синхронизация принесла чужие изменения,
     // но не во время стриминга ответа, чтобы не сбить генерацию.
     const revision = sync.revision;
@@ -216,6 +225,7 @@
       citations: last.citations
     });
     notes = [n, ...notes];
+    expandedIds[n.id] = true;
     toasts.success('Сохранено в конспекты');
   }
 
@@ -230,12 +240,18 @@
       tags: []
     });
     notes = [n, ...notes];
+    expandedIds[n.id] = true;
     noteDraft = '';
+  }
+
+  function toggleNote(noteId: string): void {
+    expandedIds[noteId] = !expandedIds[noteId];
   }
 
   async function removeNote(note: Note): Promise<void> {
     await deleteNote(note.id);
     notes = notes.filter((n) => n.id !== note.id);
+    delete expandedIds[note.id];
   }
 
   async function removeTopic(): Promise<void> {
@@ -360,25 +376,17 @@
 
         {#if notes.length === 0}
           <div class="empty">Конспектов пока нет.</div>
+        {:else}
+          <p class="mute tiny hint">Нажмите на название, чтобы раскрыть конспект.</p>
         {/if}
 
         {#each notes as n (n.id)}
-          <article class="card note">
-            <div class="row-between" style="margin-bottom: 6px">
-              <div class="mute tiny">{formatDate(n.createdAt)} · {n.source}</div>
-              <button class="btn btn-sm btn-ghost" onclick={() => removeNote(n)}>Удалить</button>
-            </div>
-            <Markdown md={n.md} />
-            {#if n.citations && n.citations.length > 0}
-              <ul class="cites">
-                {#each n.citations as c (c.url)}
-                  <li>
-                    <a href={c.url} target="_blank" rel="noreferrer noopener">{c.title || c.url}</a>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </article>
+          <NoteCard
+            note={n}
+            open={!!expandedIds[n.id]}
+            onToggle={() => toggleNote(n.id)}
+            onRemove={() => removeNote(n)}
+          />
         {/each}
       </div>
     {/if}
@@ -469,10 +477,8 @@
     white-space: pre-wrap;
   }
 
-  .note .cites {
-    margin: 8px 0 0;
-    padding-left: 18px;
-    font-size: 0.8rem;
+  .hint {
+    margin: 0;
   }
 
   @media (max-width: 640px) {
