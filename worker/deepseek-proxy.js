@@ -766,14 +766,12 @@ export default {
    * пишет строку в лог — деплой без настроенных напоминаний остаётся рабочим.
    */
   async scheduled(event, env, ctx) {
+    // Без PUSH_KV или VAPID-ключей runScheduled сразу возвращает skipped —
+    // не пишем об этом каждую минуту, иначе лог воркера превращается в шум.
     ctx.waitUntil(
-      runScheduled(env)
-        .then((result) => {
-          if (result.skipped) console.log(`[push] cron пропущен: ${result.skipped}`);
-        })
-        .catch((err) => {
-          console.log(`[push] ✖ cron: ${err instanceof Error ? err.message : String(err)}`);
-        })
+      runScheduled(env).catch((err) => {
+        console.log(`[push] ✖ cron: ${err instanceof Error ? err.message : String(err)}`);
+      })
     );
   }
 };
