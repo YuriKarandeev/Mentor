@@ -30,6 +30,10 @@ const cssFiles = assets.filter((f) => f.endsWith('.css'));
 check(jsFiles.length > 0, 'собран JS-бандл');
 check(cssFiles.length > 0, 'собран CSS-бандл');
 
+const css = cssFiles.map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8')).join('\n');
+check(css.includes('safe-area-inset-top'), 'в CSS есть отступ под «челку» (safe-area-inset-top)');
+check(css.includes('safe-area-inset-bottom'), 'в CSS есть отступ под home-индикатор (safe-area-inset-bottom)');
+
 const js = jsFiles.map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8')).join('\n');
 check(js.includes('Наставник'), 'в бандле есть строки интерфейса');
 check(js.includes('deepseek'), 'в бандле есть клиент DeepSeek');

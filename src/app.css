@@ -6,6 +6,11 @@
   --radius-m: 16px;
   --radius-l: 22px;
   --nav-h: 60px;
+  /* Безопасные зоны iPhone: «челка»/динамический остров, home-индикатор, скругления. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
   --font: 'Inter', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
   --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
 }

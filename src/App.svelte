@@ -143,18 +143,24 @@
     display: grid;
     place-items: center;
     min-height: 100vh;
+    min-height: 100dvh;
+    padding: calc(16px + var(--safe-top)) calc(16px + var(--safe-right))
+      calc(16px + var(--safe-bottom)) calc(16px + var(--safe-left));
     color: var(--text-mute);
   }
 
   .shell {
     display: flex;
     min-height: 100vh;
+    min-height: 100dvh;
   }
 
   main {
     flex: 1;
     min-width: 0;
-    padding: 16px 14px calc(var(--nav-h) + 24px);
+    /* Сверху — отступ под «челку»/динамический остров, снизу — под нижнюю панель и home-индикатор. */
+    padding: calc(16px + var(--safe-top)) calc(14px + var(--safe-right))
+      calc(var(--nav-h) + 24px + var(--safe-bottom)) calc(14px + var(--safe-left));
   }
 
   /* --- мобильная навигация --- */
@@ -163,8 +169,10 @@
     left: 0;
     right: 0;
     bottom: 0;
-    height: calc(var(--nav-h) + env(safe-area-inset-bottom, 0px));
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    height: calc(var(--nav-h) + var(--safe-bottom));
+    padding-bottom: var(--safe-bottom);
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
     display: flex;
     background: var(--bg-elev);
     border-top: 1px solid var(--border-soft);
@@ -274,16 +282,17 @@
       gap: 18px;
       width: 250px;
       flex: 0 0 250px;
-      padding: 20px 14px;
+      padding: calc(20px + var(--safe-top)) 14px 20px;
       border-right: 1px solid var(--border-soft);
       position: sticky;
       top: 0;
       height: 100vh;
+      height: 100dvh;
       background: var(--bg-elev);
     }
 
     main {
-      padding: 28px 32px 48px;
+      padding: calc(28px + var(--safe-top)) 32px 48px;
     }
 
     .bottom {

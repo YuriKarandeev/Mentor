@@ -230,13 +230,15 @@
     background: rgba(0, 0, 0, 0.45);
     display: grid;
     place-items: center;
-    padding: 16px;
+    padding: calc(16px + var(--safe-top)) calc(16px + var(--safe-right))
+      calc(16px + var(--safe-bottom)) calc(16px + var(--safe-left));
     z-index: 100;
   }
 
   .sheet {
     width: min(560px, 100%);
     max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px - var(--safe-top) - var(--safe-bottom));
     overflow-y: auto;
     padding: 18px;
     display: flex;

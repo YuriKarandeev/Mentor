@@ -15,12 +15,12 @@
     position: fixed;
     left: 50%;
     transform: translateX(-50%);
-    bottom: calc(var(--nav-h) + 16px);
+    bottom: calc(var(--nav-h) + 16px + var(--safe-bottom));
     z-index: 60;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    width: min(520px, calc(100vw - 24px));
+    width: min(520px, calc(100vw - 24px - var(--safe-left) - var(--safe-right)));
     pointer-events: none;
   }
 
