@@ -47,6 +47,9 @@ check(js.includes('planner_actions'), 'в бандле есть инструме
 check(js.includes('Загрузить копию «Ассистента»'), 'в бандле есть импорт календаря из «Ассистента»');
 check(js.includes('Все дела'), 'в бандле есть страница дел с повтором');
 check(js.includes('task.create'), 'в бандле есть действия помощника с делами');
+check(js.includes('Напоминать о событиях и делах'), 'в бандле есть карточка напоминаний');
+check(js.includes('/api/push/schedule'), 'в бандле есть отправка расписания напоминаний');
+check(js.includes('/api/push/config'), 'в бандле есть получение VAPID-ключа');
 
 const firebaseFiles = jsFiles.filter((f) =>
   fs.readFileSync(path.join(assetsDir, f), 'utf8').includes('firestore.googleapis.com')
@@ -75,6 +78,15 @@ check(fs.existsSync(swPath), 'сгенерирован service worker');
 if (fs.existsSync(swPath)) {
   const sw = fs.readFileSync(swPath, 'utf8');
   check(sw.includes('precache'), 'service worker содержит precache');
+  check(sw.includes('push-sw.js'), 'service worker подключает обработчик push');
+}
+
+const pushSwPath = path.join(dist, 'push-sw.js');
+check(fs.existsSync(pushSwPath), 'обработчик push скопирован в dist');
+if (fs.existsSync(pushSwPath)) {
+  const pushSw = fs.readFileSync(pushSwPath, 'utf8');
+  check(pushSw.includes("addEventListener('push'"), 'push-sw.js слушает событие push');
+  check(pushSw.includes("addEventListener('notificationclick'"), 'push-sw.js открывает приложение по клику');
 }
 
 if (failures.length > 0) {

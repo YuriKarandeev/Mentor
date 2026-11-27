@@ -1,5 +1,6 @@
 import { connectionOf, isConfigured, type Connection } from '../api/conn';
 import { DEFAULT_SETTINGS, getKv, setKv, type AppSettings } from '../db/db';
+import { normalizeReminderSettings } from '../utils/reminders';
 
 const KEY = 'settings';
 
@@ -9,7 +10,13 @@ class SettingsStore {
 
   async load(): Promise<void> {
     const stored = await getKv<Partial<AppSettings>>(KEY, {});
-    this.data = { ...DEFAULT_SETTINGS, ...stored };
+    this.data = {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      // Старые настройки не знают о напоминаниях: недостающие поля берём
+      // из значений по умолчанию, битые — приводим к безопасному виду.
+      reminders: normalizeReminderSettings(stored.reminders)
+    };
     this.loaded = true;
   }
 

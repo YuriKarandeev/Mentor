@@ -9,6 +9,7 @@
   import TasksPage from './lib/pages/TasksPage.svelte';
   import TopicPage from './lib/pages/TopicPage.svelte';
   import TopicsPage from './lib/pages/TopicsPage.svelte';
+  import { initReminders } from './lib/push/client';
   import { router } from './lib/router.svelte';
   import { profile } from './lib/stores/profile.svelte';
   import { settings } from './lib/stores/settings.svelte';
@@ -37,6 +38,9 @@
       // Firebase тянется отдельным чанком и только при включённой синхронизации.
       const { initSync } = await import('./lib/sync/engine');
       void initSync();
+      // Напоминания: пересчёт расписания при правках и возврате в приложение.
+      // Модуль ничего не делает, пока пользователь не включил их в «Настройках».
+      initReminders();
     })();
   });
 

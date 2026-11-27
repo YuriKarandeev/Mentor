@@ -11,6 +11,10 @@
     "proxy:tail": "npx -y wrangler@latest tail",
     "proxy:secret:key": "npx -y wrangler@latest secret put DEEPSEEK_API_KEY",
     "proxy:secret:token": "npx -y wrangler@latest secret put APP_TOKEN",
+    "proxy:secret:vapid-public": "npx -y wrangler@latest secret put VAPID_PUBLIC_KEY",
+    "proxy:secret:vapid-private": "npx -y wrangler@latest secret put VAPID_PRIVATE_KEY",
+    "proxy:secret:vapid-subject": "npx -y wrangler@latest secret put VAPID_SUBJECT",
+    "proxy:kv:create": "npx -y wrangler@latest kv namespace create PUSH_KV",
     "deploy": "npx -y wrangler@latest deploy",
     "tail": "npx -y wrangler@latest tail"
   }

@@ -3,6 +3,17 @@
   import { connectionOf, type ConnMode } from '../api/conn';
   import { webToolsSupported } from '../api/agent';
   import { db, wipeAll, type Effort, type Level, type ThemeMode } from '../db/db';
+  import {
+    disableReminders,
+    enableReminders,
+    plannedReminders,
+    readStatus,
+    refreshReminders,
+    sendTestReminder,
+    serverHint,
+    unsupportedReason,
+    type ReminderStatus
+  } from '../push/client';
   import { profile } from '../stores/profile.svelte';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
@@ -11,6 +22,15 @@
   import { describeSyncError, rulesConsoleUrl, type SyncStep } from '../sync/errors';
   import { importAssistantFileText } from '../sync/import-assistant';
   import { formatDate } from '../utils/format';
+  import {
+    REMINDER_LEADS,
+    normalizeReminderSettings,
+    reminderLabel,
+    remindersSummary,
+    type ReminderDraft,
+    type ReminderSettings
+  } from '../utils/reminders';
+  import { onMount } from 'svelte';
 
   const MODELS = ['deepseek-flash', 'deepseek-v4-pro'];
   const EFFORTS: Effort[] = ['low', 'high', 'max'];
@@ -29,7 +49,109 @@
     model: 'deepseek-flash',
     effort: 'high' as Effort,
     webSearch: true,
-    theme: 'auto' as ThemeMode
+    theme: 'auto' as ThemeMode,
+    reminders: { ...normalizeReminderSettings(undefined) }
+  });
+
+  /* --- напоминания --- */
+  let reminderStatus = $state<ReminderStatus | null>(null);
+  let reminderBusy = $state(false);
+  let reminderMessage = $state('');
+  let reminderFailed = $state(false);
+  let reminderPreview = $state<ReminderDraft[]>([]);
+
+  /** Свежие данные о поддержке, разрешении и подписке — для карточки. */
+  async function loadReminderStatus(): Promise<void> {
+    reminderStatus = await readStatus();
+  }
+
+  /** Ближайшие напоминания по локальным данным: показываем 3. */
+  async function loadReminderPreview(): Promise<void> {
+    try {
+      reminderPreview = (await plannedReminders()).slice(0, 3);
+    } catch {
+      reminderPreview = [];
+    }
+  }
+
+  async function toggleReminders(e: Event): Promise<void> {
+    const input = e.currentTarget as HTMLInputElement;
+    const want = input.checked;
+    reminderBusy = true;
+    reminderMessage = '';
+    reminderFailed = false;
+    try {
+      if (want) {
+        const result = await enableReminders();
+        form.reminders = normalizeReminderSettings(settings.data.reminders);
+        reminderMessage =
+          result.planned > 0
+            ? `Напоминания включены. Запланировано уведомлений: ${result.planned}.`
+            : 'Напоминания включены. Пока нечего напоминать — добавьте события или дела.';
+      } else {
+        await disableReminders();
+        form.reminders = normalizeReminderSettings(settings.data.reminders);
+        reminderMessage = 'Напоминания выключены на этом устройстве.';
+      }
+    } catch (err) {
+      reminderFailed = true;
+      reminderMessage = errorText(err);
+      input.checked = !want;
+    } finally {
+      reminderBusy = false;
+      await loadReminderStatus();
+      await loadReminderPreview();
+    }
+  }
+
+  /** Любая правка расписания сразу сохраняется и уходит в воркер. */
+  async function patchReminders(patch: Partial<ReminderSettings>): Promise<void> {
+    const next = normalizeReminderSettings({ ...form.reminders, ...patch });
+    form.reminders = next;
+    reminderBusy = true;
+    reminderMessage = '';
+    reminderFailed = false;
+    try {
+      await settings.patch({ reminders: next });
+      if (next.enabled) {
+        const result = await refreshReminders({ force: true });
+        reminderMessage =
+          result.planned > 0
+            ? `Расписание обновлено: ${result.planned} уведомлений.`
+            : 'Расписание пустое: в ближайшие часы напоминать не о чем.';
+      }
+    } catch (err) {
+      reminderFailed = true;
+      reminderMessage = errorText(err);
+    } finally {
+      reminderBusy = false;
+      await loadReminderPreview();
+    }
+  }
+
+  async function testReminder(): Promise<void> {
+    reminderBusy = true;
+    reminderMessage = '';
+    reminderFailed = false;
+    try {
+      const result = await sendTestReminder();
+      reminderFailed = result.sent === 0;
+      reminderMessage =
+        result.sent > 0
+          ? 'Тестовое уведомление отправлено — проверьте телефон.'
+          : 'Отправлять некуда: сначала включите напоминания и разрешите уведомления.';
+    } catch (err) {
+      reminderFailed = true;
+      reminderMessage = errorText(err);
+    } finally {
+      reminderBusy = false;
+      await loadReminderStatus();
+    }
+  }
+
+  onMount(() => {
+    void loadReminderStatus();
+    void loadReminderPreview();
   });
 
   /**
@@ -619,6 +741,149 @@
   </section>
 
   <section class="card col">
+    <h2>Напоминания</h2>
+    <p class="mute tiny">
+      Push-уведомления о событиях календаря и делах. Расписание на 48 часов вперёд строит приложение,
+      а отправляет ваш прокси-воркер; в облако уходят только тексты ближайших напоминаний.
+    </p>
+
+    {#if !reminderStatus}
+      <p class="mute tiny">Проверяю поддержку…</p>
+    {:else if !reminderStatus.supported}
+      <div class="err">{unsupportedReason()}</div>
+    {:else}
+      {#if reminderStatus.ios && !reminderStatus.standalone}
+        <p class="mute tiny">
+          На iPhone добавьте приложение на домашний экран (Поделиться → «На экран “Домой”») и откройте
+          его оттуда: в обычной вкладке Safari push-уведомления недоступны.
+        </p>
+      {/if}
+
+      {#if !reminderStatus.serverReady}
+        <div class="err">{serverHint()}</div>
+      {/if}
+
+      <label class="switch">
+        <input
+          type="checkbox"
+          checked={reminderStatus.enabled}
+          disabled={reminderBusy || !reminderStatus.serverReady}
+          onchange={toggleReminders}
+        />
+        <span>Напоминать о событиях и делах</span>
+      </label>
+
+      {#if reminderStatus.permission === 'denied'}
+        <div class="err">
+          Уведомления запрещены в браузере. Разрешите их в настройках сайта и обновите страницу.
+        </div>
+      {/if}
+
+      {#if reminderStatus.enabled}
+        <div class="row wrap">
+          <label class="switch">
+            <input
+              type="checkbox"
+              checked={form.reminders.events}
+              disabled={reminderBusy}
+              onchange={(e) => void patchReminders({ events: e.currentTarget.checked })}
+            />
+            <span>События</span>
+          </label>
+          <label class="switch">
+            <input
+              type="checkbox"
+              checked={form.reminders.tasks}
+              disabled={reminderBusy}
+              onchange={(e) => void patchReminders({ tasks: e.currentTarget.checked })}
+            />
+            <span>Дела</span>
+          </label>
+        </div>
+
+        <div class="row wrap">
+          <div class="grow">
+            <label for="remind-lead">Напоминать о событии</label>
+            <select
+              id="remind-lead"
+              value={form.reminders.leadMinutes}
+              disabled={reminderBusy}
+              onchange={(e) => void patchReminders({ leadMinutes: Number(e.currentTarget.value) })}
+            >
+              {#each REMINDER_LEADS as lead (lead)}
+                <option value={lead}>{lead === 0 ? 'в момент начала' : `за ${lead} мин`}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="grow">
+            <label for="remind-digest">Сводка на день</label>
+            <input
+              id="remind-digest"
+              type="time"
+              value={form.reminders.digestTime}
+              disabled={reminderBusy}
+              onchange={(e) => void patchReminders({ digestTime: e.currentTarget.value })}
+            />
+          </div>
+        </div>
+
+        <div class="row wrap">
+          <div class="grow">
+            <label for="quiet-from">Тихие часы с</label>
+            <input
+              id="quiet-from"
+              type="time"
+              value={form.reminders.quietFrom}
+              disabled={reminderBusy}
+              onchange={(e) => void patchReminders({ quietFrom: e.currentTarget.value })}
+            />
+          </div>
+          <div class="grow">
+            <label for="quiet-to">до</label>
+            <input
+              id="quiet-to"
+              type="time"
+              value={form.reminders.quietTo}
+              disabled={reminderBusy}
+              onchange={(e) => void patchReminders({ quietTo: e.currentTarget.value })}
+            />
+          </div>
+        </div>
+        <p class="mute tiny">
+          Сводка собирает события «на весь день» и дела без времени. Пустое время отключает сводку или
+          тихие часы; попавшие в тихие часы уведомления переносятся на их конец.
+        </p>
+
+        <div class="row wrap">
+          <button class="btn btn-sm" onclick={testReminder} disabled={reminderBusy}>Тест уведомления</button>
+          <button class="btn btn-sm" onclick={() => void patchReminders({})} disabled={reminderBusy}>
+            Обновить расписание
+          </button>
+        </div>
+
+        {#if reminderPreview.length}
+          <div>
+            <div class="mute tiny">Ближайшие:</div>
+            <ul class="reminder-list">
+              {#each reminderPreview as item (item.tag)}
+                <li>{reminderLabel(item)}</li>
+              {/each}
+            </ul>
+          </div>
+        {:else}
+          <p class="mute tiny">В ближайшее время напоминаний нет.</p>
+        {/if}
+      {:else}
+        <p class="mute tiny">Сейчас: {remindersSummary(form.reminders)}.</p>
+      {/if}
+
+      {#if reminderMessage}
+        <div class={reminderFailed ? 'err' : 'ok'}>{reminderMessage}</div>
+      {/if}
+    {/if}
+  </section>
+
+  <section class="card col">
     <h2>Переезд из «Ассистента»</h2>
     <p class="mute tiny">
       В «Ассистенте» откройте «Данные» → «Экспорт в JSON» и загрузите файл сюда: события календаря
@@ -716,6 +981,18 @@
     background: color-mix(in srgb, var(--ok) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent);
     color: var(--ok);
+  }
+
+  /* Ближайшие напоминания: компактный список без маркеров. */
+  .reminder-list {
+    margin: 4px 0 0;
+    padding-left: 18px;
+    color: var(--text-dim);
+    font-size: 0.86rem;
+  }
+
+  .reminder-list li {
+    margin: 2px 0;
   }
 
   label.btn {

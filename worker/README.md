@@ -22,10 +22,20 @@
 | `GET` | `/api/models` | `GET /models` | список моделей (кнопка «Проверить связь») |
 | `GET` | `/api/user/balance` | `GET /user/balance` | баланс аккаунта |
 | `POST` | `/api/chat/completions` | `POST /chat/completions` | чат, включая `stream: true` — ответ идёт потоком |
+| `GET` | `/api/push/config` | — | публичный VAPID-ключ и лимиты напоминаний |
+| `POST` | `/api/push/subscribe` | — | сохранить подписку браузера (endpoint + ключи) |
+| `DELETE` | `/api/push/subscribe` | — | снять подписку устройства |
+| `PUT` | `/api/push/schedule` | — | расписание ближайших напоминаний устройства |
+| `POST` | `/api/push/test` | — | тестовое уведомление на все подписки устройства |
+| cron | — | — | раз в минуту рассылает созревшие напоминания |
 
 Клиент всегда ходит с префиксом `/api`, а у DeepSeek маршруты без него — префикс срезается
 перед запросом к `https://api.deepseek.com`. Остальные пути → `404`.
 Без корректного `x-app-token` → `401`.
+
+`/api/push/*` обрабатываются до проверки `DEEPSEEK_API_KEY`: уведомлениям ключ модели не нужен.
+Если не заданы VAPID-ключи или нет `PUSH_KV`, эти маршруты отвечают `503` с текстом, что именно
+не настроено, — остальные функции воркера продолжают работать.
 
 ## Развёртывание
 
@@ -36,6 +46,38 @@ npx.cmd -y wrangler@latest secret put DEEPSEEK_API_KEY
 npx.cmd -y wrangler@latest secret put APP_TOKEN  # придумайте длинную случайную строку
 npx.cmd -y wrangler@latest deploy
 ```
+
+### Напоминания: VAPID, KV и cron
+
+```powershell
+cd ..                                   # в корень репозитория
+npm.cmd run vapid:keys                  # печатает пару ключей base64url
+
+cd worker
+npx.cmd -y wrangler@latest secret put VAPID_PUBLIC_KEY
+npx.cmd -y wrangler@latest secret put VAPID_PRIVATE_KEY
+npx.cmd -y wrangler@latest secret put VAPID_SUBJECT   # mailto:you@example.com
+npx.cmd -y wrangler@latest kv namespace create PUSH_KV
+```
+
+`wrangler kv namespace create PUSH_KV` печатает `id` — вставьте его в `wrangler.toml`
+(блок `[[kv_namespaces]]` там закомментирован) и задеплойте снова. Cron уже прописан:
+
+```toml
+[triggers]
+crons = ["* * * * *"]     # раз в минуту: рассылка созревших напоминаний
+```
+
+Проверка:
+
+```powershell
+curl.exe -i -H "x-app-token: <APP_TOKEN>" "$w/api/push/config"   # 200 {"ok":true,"publicKey":"..."}
+```
+
+Приватный ключ VAPID — такой же секрет, как ключ DeepSeek: он даёт право отправлять уведомления
+от имени приложения. При его смене все подписки становятся недействительными, и напоминания нужно
+включить заново на каждом устройстве.
+
 
 Если `npm`/`npx` без `.cmd` падают с `... cannot be loaded because running scripts is disabled`
 (ExecutionPolicy `Restricted`), используйте обёртки `npm.cmd` / `npx.cmd` — либо разово разрешите
@@ -222,6 +264,7 @@ curl.exe -sS -H "x-app-token: dev-token" -o NUL `
 ```powershell
 cd ..                          # из worker/ — в корень репозитория
 npm.cmd run test:worker        # scripts/test-worker.mjs: health, 401, diag, пинги, обрыв upstream
+npm.cmd run test:push          # scripts/test-push.mjs: VAPID, шифрование RFC 8291, роуты и cron
 ```
 
 Если `wrangler tail` циклически пишет `Tail connection lost: the Worker did not respond to a
@@ -238,5 +281,9 @@ Logs → Live** (не больше 10 клиентов одновременно)
 ## Замечания
 
 - Ключ DeepSeek хранится только как секрет воркера; в репозиторий и в браузер он не попадает.
+- Подписки и расписания напоминаний лежат в `PUSH_KV` по ключу `dev:<deviceId>` с TTL 30 дней:
+  устройство, которое перестало обновлять расписание, удаляется автоматически.
+  Подписки с ответом push-сервиса `404`/`410` удаляются сразу, иначе рассылка росла бы вечно.
+- В KV нет событий и дел — только заголовок, текст и время ближайших уведомлений (не больше 200 на устройство).
 - Ответы DeepSeek не кешируются (`cache-control: no-store`).
 - Стриминг не буферизуется (`x-accel-buffering: no`), поэтому первые токены приходят сразу.

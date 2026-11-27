@@ -4,6 +4,7 @@ import { notifyLocalChange } from '../sync/signal';
 import { now, uid } from '../utils/ids';
 import { toPlainValue } from '../utils/plain';
 import { AI_MAX_NOTES, AI_MAX_TITLE, text, validDate, validTime } from '../utils/planner';
+import { DEFAULT_REMINDERS, type ReminderSettings } from '../utils/reminders';
 import {
   TASK_MAX_NOTES,
   TASK_MAX_TITLE,
@@ -167,6 +168,8 @@ export interface AppSettings {
   effort: Effort;
   webSearch: boolean;
   theme: ThemeMode;
+  /** Напоминания о событиях и делах: push отправляет прокси-воркер. */
+  reminders: ReminderSettings;
 }
 
 export interface Profile {
@@ -282,7 +285,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   model: 'deepseek-flash',
   effort: 'high',
   webSearch: true,
-  theme: 'auto'
+  theme: 'auto',
+  reminders: { ...DEFAULT_REMINDERS }
 };
 
 export async function getKv<T>(key: string, fallback: T): Promise<T> {

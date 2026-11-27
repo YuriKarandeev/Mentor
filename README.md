@@ -28,6 +28,11 @@ Cloudflare, тогда ключ остаётся на сервере: он пр�
   поэтому дело не исчезает после первого выполнения. Помощник умеет `task.create/update/delete/done`
   («добавь зарядку каждый день в 8:00», «отметь, что я сделал зарядку»), а список дел выбранного
   дня виден и в календаре.
+- **Напоминания (push).** В «Настройках» включается push о событиях и делах: за N минут до события,
+  в время дела и утренняя сводка для событий «на весь день» и дел без времени. Есть тихие часы
+  (ночные переносятся на утро), тестовое уведомление и список ближайших. Расписание строит приложение
+  на 48 часов вперёд, а отправляет ваш прокси-воркер по cron; на iPhone уведомления приходят только
+  в установленном PWA (iOS 16.4+).
 - **Переезд из «Ассистента».** «Настройки» → «Загрузить копию «Ассистента»» принимает JSON-экспорт
   старого планера и переносит события календаря; повторный импорт ничего не задваивает.
 - **Библиотека.** По названию книги приложение делает разбор: ключевые идеи, применение, вопросы самопроверки, источники.
@@ -61,6 +66,9 @@ npm run test:conn  # прямой режим и прокси: пути, заго
 npm run test:plan  # связка «пункт плана ↔ конспект» и промпт конспекта
 npm run test:planner # календарь: даты, действия помощника, промпт и лимиты
 npm run test:tasks  # дела: дни недели, отметки по дням, действия task.* и промпт
+npm run test:reminders # напоминания: сводка, тихие часы, горизонт, дедупликация
+npm run test:push   # Web Push: шифрование RFC 8291, VAPID, роуты воркера и cron
+npm run vapid:keys  # генерация пары VAPID для напоминаний
 npm run build      # dist/
 npm run smoke      # проверка собранного dist без запуска сервера
 npm run preview    # локальный просмотр сборки
@@ -103,12 +111,37 @@ npm run probe:book -- --help   # диагностика обрыва стрим�
 `Load failed`, `404 not_found_error`, `401`, блокировка `npm`/`npx` в PowerShell) в
 [`docs/SETUP.md`](docs/SETUP.md).
 
+### Напоминания (Web Push)
+
+Напоминания отправляет тот же прокси-воркер: отдельного сервиса нет. Уведомлениям не нужен
+`DEEPSEEK_API_KEY` — только VAPID-ключи, KV и cron.
+
+```powershell
+npm.cmd run vapid:keys        # печатает VAPID_PUBLIC_KEY и VAPID_PRIVATE_KEY
+
+cd worker
+npx.cmd -y wrangler@latest secret put VAPID_PUBLIC_KEY
+npx.cmd -y wrangler@latest secret put VAPID_PRIVATE_KEY
+npx.cmd -y wrangler@latest secret put VAPID_SUBJECT   # mailto:you@example.com
+npx.cmd -y wrangler@latest kv namespace create PUSH_KV
+```
+
+`id` из вывода последней команды вставьте в `worker/wrangler.toml` (блок `[[kv_namespaces]]`
+закомментирован), затем `npx.cmd -y wrangler@latest deploy`. Cron `* * * * *` уже прописан.
+
+В приложении: «Настройки → Напоминания → Напоминать о событиях и делах». На iPhone push работает
+только в PWA, установленном на домашний экран (iOS 16.4+), и только после нажатия этой кнопки —
+разрешение запрашивается из жеста пользователя. Кнопка «Тест уведомления» проверяет всю цепочку.
+
+Если на воркере нет VAPID-ключей или `PUSH_KV`, карточка напоминаний честно скажет об этом,
+а `/api/push/*` вернёт `503`; остальные функции продолжат работать.
+
 ## Публикация на GitHub Pages
 
 Живой адрес: **https://yurikarandeev.github.io/Mentor/**
 
 Workflow `.github/workflows/deploy.yml` собирает проект и публикует `dist` при пуше в `main`
-(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → `npm run test:conn` → `npm run test:plan` → `npm run test:planner` → `npm run test:tasks` → иконки → `npm run build` → `npm run smoke`).
+(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → `npm run test:conn` → `npm run test:plan` → `npm run test:planner` → `npm run test:tasks` → `npm run test:reminders` → `npm run test:push` → иконки → `npm run build` → `npm run smoke`).
 `BASE_PATH` подставляется автоматически: `/<repo>/`. Роутинг — hash-based, поэтому deep links
 работают без серверных rewrite-правил.
 
@@ -157,13 +190,18 @@ src/
     db/db.ts               Dexie v4: topics, plans, messages, notes, memory, events, tasks, kv, tombstones (+ updatedAt/dirty)
     utils/                 ids, format, markdown, plain (снимает прокси $state перед записью в IndexedDB),
                            plan-note (связка «пункт плана ↔ заметка-конспект» по тегу),
-                           planner (даты и время событий), tasks (дни недели и отметки дел)
+                           planner (даты и время событий), tasks (дни недели и отметки дел),
+                           reminders (расписание напоминаний: сводка, тихие часы, горизонт)
     sync/                  синхронизация: config, firebase (ленивый SDK), model (чистые функции), engine, errors, state
+    push/client.ts         Web Push: подписка браузера, отправка расписания в воркер, статус для настроек
     stores/                settings, profile, toast (runes; данные — в IndexedDB, kv)
     components/            Markdown, MessageBubble, Composer, PlanView, ItemSummary, NoteCard, Toasts,
                            EventEditor (событие), TaskEditor (дело)
     pages/                 Topics, NewTopic, Topic, Library, Settings, Calendar, Tasks, Assistant
-worker/                    Cloudflare Worker — необязательный прокси DeepSeek
+worker/                    Cloudflare Worker — необязательный прокси DeepSeek и отправитель напоминаний
+  deepseek-proxy.js        роуты /api/*, диагностика стрима, точка входа cron
+  push.js                  Web Push: VAPID, шифрование RFC 8291, расписание в KV, рассылка
+public/push-sw.js          обработчик push и клика по уведомлению (importScripts в sw.js)
 firestore.rules            правила доступа к данным пользователя
 scripts/gen-icons.mjs      генератор PNG-иконок (zlib, без зависимостей)
 scripts/test-sync.mjs      проверки логики синхронизации без Firebase
@@ -171,6 +209,9 @@ scripts/test-conn.mjs      прямой режим и прокси: пути, з
 scripts/test-plan-note.mjs связка «пункт плана ↔ конспект» и промпт конспекта
 scripts/test-planner.mjs   календарь: даты, действия помощника, промпт
 scripts/test-tasks.mjs     дела: дни недели, отметки по дням, действия task.*
+scripts/test-reminders.mjs напоминания: сводка, тихие часы, горизонт, дедупликация
+scripts/test-push.mjs      Web Push: шифрование RFC 8291, VAPID, роуты воркера и cron
+scripts/gen-vapid-keys.mjs генерация пары VAPID для напоминаний
 ```
 
 ## Данные и приватность
@@ -182,6 +223,10 @@ scripts/test-tasks.mjs     дела: дни недели, отметки по д
   Токен прокси, ключ DeepSeek и остальные настройки устройства в облако **не** попадают.
 - Экспорт/импорт в JSON — в **Настройках**; полная очистка удаляет IndexedDB, настройки
   и (при активной синхронизации) данные в облаке.
+- **Напоминания** — единственное, что уходит на ваш воркер: подписка браузера (endpoint и ключи
+  шифрования) и тексты ближайших уведомлений (заголовок, тело, время). Ни события, ни дела, ни ключ
+  DeepSeek туда не отправляются. Записи в KV живут 30 дней и удаляются сами, если устройство
+  перестало обновлять расписание; подписки с ответом 404/410 удаляются сразу.
 
 ## Ограничения
 
@@ -199,3 +244,8 @@ scripts/test-tasks.mjs     дела: дни недели, отметки по д
   оставит только последнюю версию. Это же касается отметок дел: история `done` едет одним
   массивом, и одновременная отметка разных дней на двух устройствах оставит одну версию.
   Ограничения и квоты — в [`docs/SYNC.md`](docs/SYNC.md).
+- Напоминания требуют прокси-воркер: в прямом режиме (только ключ DeepSeek) push отправлять некому.
+  На iPhone они работают только в PWA с домашнего экрана (iOS 16.4+), на Android — в Chrome.
+  Расписание строится на 48 часов вперёд и обновляется, когда приложение открыто; если правку
+  сделали на другом устройстве, оно обновит свой список само. Уведомления в тихие часы переносятся
+  на их конец, поэтому ночное дело придёт утром, а не в момент срабатывания.

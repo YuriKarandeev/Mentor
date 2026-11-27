@@ -41,6 +41,9 @@ export default defineConfig({
         globIgnores: ['**/assets/index.esm-*.js'],
         navigateFallback: 'index.html',
         cleanupOutdatedCaches: true,
+        // Обработчик push лежит отдельным файлом в public/: так generateSW
+        // остаётся прежним, а sw.js получает только строку importScripts.
+        importScripts: ['push-sw.js'],
         // запросы к воркеру-прокси и DeepSeek никогда не кешируем
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: []

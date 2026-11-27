@@ -18,6 +18,26 @@ preview_urls = false
 # Прод: GitHub Pages, локальная разработка: Vite dev-сервер.
 ALLOWED_ORIGINS = "https://yurikarandeev.github.io,http://localhost:5173"
 
+# --- Напоминания (Web Push) -------------------------------------------------
+# Нужны три секрета (значения печатает `npm run vapid:keys` в корне репозитория):
+#   npx.cmd -y wrangler@latest secret put VAPID_PUBLIC_KEY
+#   npx.cmd -y wrangler@latest secret put VAPID_PRIVATE_KEY
+#   npx.cmd -y wrangler@latest secret put VAPID_SUBJECT   # mailto:you@example.com
+#
+# И KV-хранилище для подписок и расписаний:
+#   npx.cmd -y wrangler@latest kv namespace create PUSH_KV
+# Затем раскомментируйте блок ниже и вставьте id из вывода команды.
+# Пока KV нет, напоминания отвечают 503, а всё остальное работает как раньше.
+#
+# [[kv_namespaces]]
+# binding = "PUSH_KV"
+# id = "<id из вывода wrangler kv namespace create PUSH_KV>"
+
+# Cron раз в минуту: рассылка созревших напоминаний. Без PUSH_KV и VAPID-ключей
+# обработчик сразу выходит — на остальные функции это не влияет.
+[triggers]
+crons = ["* * * * *"]
+
 [observability]
 enabled = true
 
