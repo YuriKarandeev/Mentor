@@ -38,6 +38,9 @@ users/{uid}/
   memory/{topicId}     { text, updatedAt, srvUpdatedAt }
   events/{eventId}     { title, date, time, endTime, allDay, notes, createdAt, updatedAt, srvUpdatedAt }
   tasks/{taskId}       { title, notes, days[], onceDate, time, done[], createdAt, updatedAt, srvUpdatedAt }
+  push/{deviceId}      { endpoint, keys{p256dh,auth}, label, ua, timeZone, updatedAt }
+  pushPlan/{deviceId}  { items[{key,at,title,body,tag,url}], leadMinutes, timeZone, version, testAt? }
+  pushState/{deviceId} { sent{key:ISO}, lastRunAt, lastTestAt, lastError, updatedAt }
   tombstones/{type:id} { type, refId, deletedAt, origin, srvUpdatedAt }
 ```
 
@@ -48,6 +51,12 @@ users/{uid}/
 Дела (`tasks`) — повторяющиеся задачи. `days` — дни недели `0…6` (0 — понедельник),
 `onceDate` — дата разового дела (тогда `days` пуст), `done` — история отметок по датам.
 Удаление темы дел не затрагивает.
+
+Коллекции `push`, `pushPlan`, `pushState` — не данные ученика, а транспорт напоминаний:
+их пишет только клиент (подписка устройства и готовый план на две недели), а `pushState`
+заполняет workflow `notify.yml`, когда отправляет уведомление. Движок синхронизации их
+не читает и не зеркалит: у каждой коллекции ключ — `deviceId`, поэтому устройства друг
+друга не перезаписывают. Правила Firestore для них те же: владелец `users/{uid}`.
 
 Правила доступа: только владелец (`request.auth.uid == uid`), всё остальное закрыто.
 `apiKey` в клиенте — не секрет; доступ ограничивают правила.

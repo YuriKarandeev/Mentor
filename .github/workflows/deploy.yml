@@ -83,6 +83,9 @@ jobs:
           VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
           VITE_FIREBASE_SENDER_ID: ${{ vars.VITE_FIREBASE_SENDER_ID }}
           VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+          # Публичный VAPID-ключ (base64url) — нужен браузеру для подписки на push.
+          # Приватный ключ живёт только в секретах `notify.yml`.
+          VITE_VAPID_PUBLIC_KEY: ${{ vars.VITE_VAPID_PUBLIC_KEY }}
 
       - name: Smoke test dist
         run: npm run smoke

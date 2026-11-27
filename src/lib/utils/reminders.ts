@@ -4,8 +4,8 @@
  * Модуль чистый — без Dexie, Svelte, сети и `Date.now()` внутри логики:
  * текущее время приходит параметром, поэтому `npm run test:reminders`
  * проверяет расписание в любом часовом поясе. Абсолютные метки времени
- * считаются по локальным датам устройства: воркеру часовой пояс не нужен,
- * он получает уже готовые UTC-миллисекунды.
+ * считаются по локальным датам устройства: отправителю часовой пояс не нужен,
+ * он получает уже готовые UTC-метки.
  *
  * Дни недели — как в делах: 0 — понедельник … 6 — воскресенье.
  */
@@ -28,7 +28,12 @@ export interface ReminderSettings {
   quietFrom: string;
   /** Конец тихих часов «ЧЧ:ММ». */
   quietTo: string;
-  /** На сколько часов вперёд планировать (6…168). */
+  /**
+   * На сколько часов вперёд планировать (6…336).
+   *
+   * В облако уходит готовый план, а отправляет его GitHub Actions, поэтому
+   * горизонт должен переживать несколько дней без открытия приложения.
+   */
   horizonHours: number;
 }
 
@@ -42,11 +47,19 @@ export const DEFAULT_REMINDERS: ReminderSettings = {
   digestTime: '09:00',
   quietFrom: '22:00',
   quietTo: '08:00',
-  horizonHours: 48
+  // Две недели, как у «Ассистента»: план лежит в Firestore и рассылается
+  // по cron, поэтому напоминания не должны иссякнуть, пока приложение закрыто.
+  horizonHours: 336
 };
 
-/** Больше воркер всё равно не примет (см. worker/push.js). */
-export const REMINDER_MAX_ITEMS = 120;
+/**
+ * Предел длины плана в облаке. 400 элементов — это ~100 КБ документа:
+ * далеко до лимита Firestore, но уже с запасом на две недели дел и событий.
+ */
+export const REMINDER_MAX_ITEMS = 400;
+
+/** Версия формата плана в Firestore; отправитель понимает только её. */
+export const PLAN_VERSION = 1;
 /** Не отправляем то, что должно было уйти раньше, чем через 20 секунд после «сейчас». */
 const MIN_LEAD_MS = 20_000;
 const MAX_BODY = 240;
@@ -54,14 +67,30 @@ const MAX_BODY = 240;
 export type ReminderKind = 'event' | 'task' | 'digest';
 
 export interface ReminderDraft {
-  /** Момент отправки, UTC-миллисекунды (уходит в воркер как есть). */
+  /** Момент отправки, UTC-миллисекунды. */
   at: number;
   title: string;
   body: string;
-  /** Стабильный идентификатор: по нему воркер заменяет прошлую версию. */
+  /** Стабильный идентификатор: по нему устройство заменяет прошлую версию. */
   tag: string;
   kind: ReminderKind;
   /** Что открыть по нажатию: hash-маршрут приложения. */
+  url: string;
+}
+
+/**
+ * Элемент плана, который уходит в Firestore (`users/{uid}/pushPlan/{deviceId}`).
+ * Момент отправки — ISO-строка: так его одинаково понимают браузер,
+ * Firestore и отправитель на Node.
+ */
+export interface ReminderPlanItem {
+  /** Ключ дедупликации — совпадает с `tag`. */
+  key: string;
+  /** ISO-метка момента отправки. */
+  at: string;
+  title: string;
+  body: string;
+  tag: string;
   url: string;
 }
 
@@ -203,6 +232,39 @@ export function buildReminders(input: ReminderInput): ReminderDraft[] {
   return out.slice(0, REMINDER_MAX_ITEMS);
 }
 
+/**
+ * Превращает черновики в элементы плана для Firestore.
+ *
+ * Поля фиксированные и только строки: Firestore не принимает `undefined`,
+ * а отправитель не должен ничего додумывать.
+ */
+export function toPlanItems(items: ReminderDraft[]): ReminderPlanItem[] {
+  const out: ReminderPlanItem[] = [];
+  for (const item of items) {
+    const at = new Date(item.at);
+    if (Number.isNaN(at.getTime())) continue;
+    const tag = text(item.tag, 120);
+    if (!tag) continue;
+    out.push({
+      key: tag,
+      at: at.toISOString(),
+      title: text(item.title, 120) || 'Наставник',
+      body: text(item.body, MAX_BODY),
+      tag,
+      url: text(item.url, 200)
+    });
+  }
+  return out;
+}
+
+/**
+ * Отпечаток плана: по нему приложение понимает, что расписание не изменилось
+ * и записывать документ в облако второй раз не нужно.
+ */
+export function planSignature(items: ReminderPlanItem[], leadMinutes = 0): string {
+  return `${Math.max(0, Math.round(leadMinutes))}|${items.map((item) => `${item.key}@${item.at}`).join('|')}`;
+}
+
 /** Локальные «ЧЧ:ММ» произвольного момента. */
 export function localTimeOf(value: Date | number): string {
   const d = value instanceof Date ? value : new Date(value);
@@ -299,7 +361,7 @@ export function normalizeReminderSettings(
     quietFrom: quietOk ? quietFrom : '',
     quietTo: quietOk ? quietTo : '',
     horizonHours: Number.isFinite(horizon)
-      ? Math.min(Math.max(Math.round(horizon), 6), 168)
+      ? Math.min(Math.max(Math.round(horizon), 6), 336)
       : DEFAULT_REMINDERS.horizonHours
   };
 }
@@ -348,8 +410,8 @@ function dayLabel(iso: string, today: string): string {
 function daysInHorizon(today: string, untilMs: number): string[] {
   const days: string[] = [];
   let iso = today;
-  // 168 часов — максимум 8 дней; +2 дня запаса на переходы и часовые пояса.
-  for (let i = 0; i < 10 && iso; i += 1) {
+  // 336 часов — максимум 15 дней; +2 дня запаса на переходы и часовые пояса.
+  for (let i = 0; i < 18 && iso; i += 1) {
     days.push(iso);
     const dayEnd = atLocalDay(iso, 24 * 60 - 1);
     if (!Number.isFinite(dayEnd) || dayEnd > untilMs) break;

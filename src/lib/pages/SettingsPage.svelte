@@ -9,11 +9,13 @@
     plannedReminders,
     readStatus,
     refreshReminders,
-    sendTestReminder,
-    serverHint,
+    remindersHint,
+    requestServerTest,
+    testReminderLocally,
     unsupportedReason,
     type ReminderStatus
   } from '../push/client';
+  import { DELIVERY_DELAY } from '../push/config';
   import { profile } from '../stores/profile.svelte';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
@@ -86,7 +88,7 @@
         form.reminders = normalizeReminderSettings(settings.data.reminders);
         reminderMessage =
           result.planned > 0
-            ? `Напоминания включены. Запланировано уведомлений: ${result.planned}.`
+            ? `Напоминания включены: ${result.planned} уведомлений на две недели вперёд. Первое придёт ${DELIVERY_DELAY} после своего времени.`
             : 'Напоминания включены. Пока нечего напоминать — добавьте события или дела.';
       } else {
         await disableReminders();
@@ -129,17 +131,31 @@
     }
   }
 
-  async function testReminder(): Promise<void> {
+  /** Тест сразу: проверяет разрешение и обработчик push на этом устройстве. */
+  async function testReminderLocal(): Promise<void> {
     reminderBusy = true;
     reminderMessage = '';
     reminderFailed = false;
     try {
-      const result = await sendTestReminder();
-      reminderFailed = result.sent === 0;
+      await testReminderLocally();
       reminderMessage =
-        result.sent > 0
-          ? 'Тестовое уведомление отправлено — проверьте телефон.'
-          : 'Отправлять некуда: сначала включите напоминания и разрешите уведомления.';
+        'Показал уведомление на этом устройстве. Если его не видно — проверьте разрешения браузера.';
+    } catch (err) {
+      reminderFailed = true;
+      reminderMessage = errorText(err);
+    } finally {
+      reminderBusy = false;
+    }
+  }
+
+  /** Тест доставки: запрос попадает в план, отвечает уже GitHub Actions. */
+  async function testReminderServer(): Promise<void> {
+    reminderBusy = true;
+    reminderMessage = '';
+    reminderFailed = false;
+    try {
+      await requestServerTest();
+      reminderMessage = `Запрос отправлен. Тестовое уведомление придёт ${DELIVERY_DELAY} — когда GitHub Actions заберёт план.`;
     } catch (err) {
       reminderFailed = true;
       reminderMessage = errorText(err);
@@ -152,6 +168,21 @@
   onMount(() => {
     void loadReminderStatus();
     void loadReminderPreview();
+  });
+
+  /**
+   * Вход и выход из аккаунта меняют адрес плана в Firestore: после входа
+   * расписание надо записать заново, после выхода — просто обновить карточку.
+   */
+  let lastUid = '';
+  $effect(() => {
+    const current = sync.user?.uid ?? '';
+    if (current === lastUid) return;
+    lastUid = current;
+    void loadReminderStatus();
+    if (current && normalizeReminderSettings(settings.data.reminders).enabled) {
+      void refreshReminders({ force: true }).catch(() => undefined);
+    }
   });
 
   /**
@@ -743,8 +774,9 @@
   <section class="card col">
     <h2>Напоминания</h2>
     <p class="mute tiny">
-      Push-уведомления о событиях календаря и делах. Расписание на 48 часов вперёд строит приложение,
-      а отправляет ваш прокси-воркер; в облако уходят только тексты ближайших напоминаний.
+      Push-уведомления о событиях календаря и делах. Приложение строит расписание на две недели вперёд
+      и кладёт его в облако, а отправляет GitHub Actions — своего сервера у приложения нет. Поэтому
+      уведомление приходит с задержкой: {DELIVERY_DELAY} после своего времени.
     </p>
 
     {#if !reminderStatus}
@@ -759,15 +791,15 @@
         </p>
       {/if}
 
-      {#if !reminderStatus.serverReady}
-        <div class="err">{serverHint()}</div>
+      {#if remindersHint()}
+        <div class="err">{remindersHint()}</div>
       {/if}
 
       <label class="switch">
         <input
           type="checkbox"
           checked={reminderStatus.enabled}
-          disabled={reminderBusy || !reminderStatus.serverReady}
+          disabled={reminderBusy || !reminderStatus.ready}
           onchange={toggleReminders}
         />
         <span>Напоминать о событиях и делах</span>
@@ -776,6 +808,12 @@
       {#if reminderStatus.permission === 'denied'}
         <div class="err">
           Уведомления запрещены в браузере. Разрешите их в настройках сайта и обновите страницу.
+        </div>
+      {/if}
+
+      {#if reminderStatus.enabled && !reminderStatus.subscribed}
+        <div class="err">
+          Подписка этого устройства не найдена — выключите и включите напоминания заново.
         </div>
       {/if}
 
@@ -855,11 +893,42 @@
         </p>
 
         <div class="row wrap">
-          <button class="btn btn-sm" onclick={testReminder} disabled={reminderBusy}>Тест уведомления</button>
+          <button class="btn btn-sm" onclick={testReminderLocal} disabled={reminderBusy}>
+            Тест на устройстве
+          </button>
+          <button class="btn btn-sm" onclick={testReminderServer} disabled={reminderBusy}>
+            Проверить доставку
+          </button>
           <button class="btn btn-sm" onclick={() => void patchReminders({})} disabled={reminderBusy}>
             Обновить расписание
           </button>
         </div>
+
+        <p class="mute tiny">
+          «Тест на устройстве» показывает уведомление сразу — так видно, что браузер его отображает.
+          «Проверить доставку» просит GitHub Actions прислать push: ответ идёт с задержкой, зато
+          проверяется вся цепочка целиком.
+        </p>
+
+        {#if reminderStatus.pendingTest > 0}
+          <p class="mute tiny">
+            Проверка доставки запрошена {formatDate(reminderStatus.pendingTest)} — ждём ближайший запуск
+            GitHub Actions.
+          </p>
+        {/if}
+        {#if reminderStatus.lastRunAt > 0}
+          <p class="mute tiny">
+            GitHub Actions последний раз проверял это устройство {formatDate(reminderStatus.lastRunAt)}.
+          </p>
+        {:else}
+          <p class="mute tiny">
+            GitHub Actions ещё ни разу не запускался для этого устройства: первое уведомление придёт
+            после ближайшего запуска по расписанию.
+          </p>
+        {/if}
+        {#if reminderStatus.lastError}
+          <div class="err">Последняя ошибка доставки: {reminderStatus.lastError}</div>
+        {/if}
 
         {#if reminderPreview.length}
           <div>

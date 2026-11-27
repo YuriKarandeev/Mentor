@@ -48,8 +48,9 @@ check(js.includes('Загрузить копию «Ассистента»'), 'в
 check(js.includes('Все дела'), 'в бандле есть страница дел с повтором');
 check(js.includes('task.create'), 'в бандле есть действия помощника с делами');
 check(js.includes('Напоминать о событиях и делах'), 'в бандле есть карточка напоминаний');
-check(js.includes('/api/push/schedule'), 'в бандле есть отправка расписания напоминаний');
-check(js.includes('/api/push/config'), 'в бандле есть получение VAPID-ключа');
+check(js.includes('GitHub Actions'), 'в бандле напоминания отправляет GitHub Actions');
+check(js.includes('pushPlan'), 'в бандле есть запись плана напоминаний в Firestore');
+check(!js.includes('/api/push/'), 'в бандле нет обращений к Cloudflare-роутам push');
 
 const firebaseFiles = jsFiles.filter((f) =>
   fs.readFileSync(path.join(assetsDir, f), 'utf8').includes('firestore.googleapis.com')

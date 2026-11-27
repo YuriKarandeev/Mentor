@@ -1,0 +1,63 @@
+name: Push reminders
+
+# Рассылка напоминаний «Наставника» без своего сервера: приложение пишет план
+# в Firestore, а этот workflow раз в 5 минут забирает созревшее и отправляет
+# push через web-push. Пока приложение закрыто, расписание всё равно работает.
+#
+# Настройка (один раз):
+#   gh secret set FIREBASE_SERVICE_ACCOUNT < service-account.json
+#   gh secret set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT
+# Подробности — docs/SETUP.md, раздел «Напоминания».
+#
+# GitHub отключает scheduled workflow после 60 дней без коммитов в репозиторий —
+# после этого расписание надо включить кнопкой «Enable workflow» на этой странице.
+
+on:
+  schedule:
+    # Каждые 5 минут: минимальный шаг, который GitHub позволяет стабильно.
+    # Реальное время доставки — от минуты до ~10 минут.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Режим запуска'
+        type: choice
+        options:
+          - dry-run
+          - send
+          - test
+        default: dry-run
+
+permissions:
+  contents: read
+
+# Два запуска одновременно писать в pushState не должны.
+concurrency:
+  group: push-reminders
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: _push/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix _push --no-audit --no-fund
+
+      # По расписанию inputs нет — это обычная рассылка (`send`).
+      - name: Send reminders
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
+          PUSH_MODE: ${{ inputs.mode || 'send' }}
+        run: node _push/send.mjs

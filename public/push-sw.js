@@ -5,7 +5,7 @@
  * (опция `workbox.importScripts` в vite.config.ts). Так не нужно переводить
  * сборку на injectManifest: precache и автообновление остаются прежними.
  *
- * Данные приходят от `worker/push.js` в поле `data` JSON-ом:
+ * Данные приходят от отправителя (`_push/send.mjs`) JSON-ом:
  *   { title, body, tag, url }
  */
 /* global self, clients */
@@ -64,8 +64,10 @@ self.addEventListener('notificationclick', (event) => {
   );
 });
 
-// Подписка не пережила обновление iOS/браузера: приложение пересоздаст её
-// при следующем открытии (см. src/lib/push/client.ts → ensureSubscription).
+// Подписка не пережила обновление iOS/браузера: из service worker новый
+// VAPID-ключ не подписать, поэтому подписку пересоздаёт приложение при
+// следующем включении напоминаний или по кнопке «Проверить доставку»
+// (см. src/lib/push/client.ts → ensureSubscription / requestServerTest).
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(Promise.resolve());
 });

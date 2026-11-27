@@ -1,50 +1,74 @@
 /**
- * Клиент Web Push: подписка браузера, отправка расписания в воркер и статус
+ * Клиент Web Push: подписка браузера, план напоминаний в Firestore и статус
  * для страницы «Настройки».
  *
- * Схема:
- *  1. пользователь нажимает «Включить напоминания» — это жест, без него iOS
- *     не показывает запрос разрешения;
- *  2. service worker подписывается на push (`pushManager.subscribe`) с
- *     публичным VAPID-ключом воркера (`GET /api/push/config`);
- *  3. подписка уходит в воркер (`POST /api/push/subscribe`) вместе с id
- *     устройства из IndexedDB;
- *  4. при любом изменении событий/дел приложение пересчитывает ближайшие
- *     напоминания (`buildReminders`) и отправляет их в воркер
- *     (`PUT /api/push/schedule`). Воркер по cron рассылает push.
+ * Схема (как у «Ассистента»):
+ *  1. пользователь вошёл через Google и нажал «Включить напоминания» — это жест,
+ *     без него iOS не показывает запрос разрешения;
+ *  2. service worker подписывается на push (`pushManager.subscribe`) с публичным
+ *     VAPID-ключом из `./config.ts`;
+ *  3. подписка уходит в Firestore: `users/{uid}/push/{deviceId}`;
+ *  4. при любом изменении событий/дел приложение пересчитывает расписание
+ *     (`buildReminders`) и кладёт его в `users/{uid}/pushPlan/{deviceId}`;
+ *  5. GitHub Actions (`_push/send.mjs`) по cron читает планы и рассылает push,
+ *     отмечая отправленное в `users/{uid}/pushState/{deviceId}`.
  *
- * Часовой пояс воркеру не нужен: моменты времени уже абсолютные.
+ * Своего сервера у приложения нет: DeepSeek вызывается напрямую из браузера,
+ * а push — это Firestore плюс scheduled workflow. Задержка доставки — от минуты
+ * до ~10 минут: точность cron GitHub Actions.
+ *
  * Сеть и браузерные API здесь изолированы — сама логика расписания лежит
  * в `utils/reminders.ts` и проверяется отдельным тестом.
  */
 import { allEvents, allTasks, getKv, setKv } from '../db/db';
 import { settings } from '../stores/settings.svelte';
+import { loadFirebase, syncConfigured, type FirestoreModule } from '../sync/firebase';
 import { onLocalChange } from '../sync/signal';
+import { sync } from '../sync/state.svelte';
 import { uid } from '../utils/ids';
 import {
   buildReminders,
   normalizeReminderSettings,
+  planSignature,
+  PLAN_VERSION,
+  toPlanItems,
   type ReminderDraft,
+  type ReminderPlanItem,
   type ReminderSettings
-} from '../utils/reminders.ts';
+} from '../utils/reminders';
+import { VAPID_PUBLIC_KEY, pushConfigured } from './config';
 
 const DEVICE_KEY = 'push-device';
 const HASH_KEY = 'push-schedule-hash';
-/** Пересчёт после локальной правки — с задержкой, чтобы не отправлять каждый символ. */
+/** Пересчёт после локальной правки — с задержкой, чтобы не писать каждый символ. */
 const LOCAL_CHANGE_DELAY_MS = 4000;
 /** Полная перепроверка, пока приложение открыто (на случай правок на другом устройстве). */
 const HEARTBEAT_MS = 30 * 60_000;
-const REQUEST_TIMEOUT_MS = 15_000;
+
+const SIGN_IN_HINT =
+  'Напоминания отправляет GitHub Actions по расписанию в облаке, поэтому нужен вход через Google: «Настройки → Синхронизация».';
+const NOT_CONFIGURED_HINT =
+  'Доставка напоминаний не настроена: в сборку не добавлен публичный VAPID-ключ (см. docs/SETUP.md).';
 
 export interface ReminderStatus {
   supported: boolean;
   permission: NotificationPermission | 'unsupported';
-  /** В настройках выбран прокси-воркер и есть токен — иначе push отправить некому. */
-  serverReady: boolean;
+  /** Есть публичный VAPID-ключ — без него браузер не подпишется. */
+  configured: boolean;
+  /** Пользователь вошёл: только тогда есть куда записать подписку и план. */
+  signedIn: boolean;
+  /** Включить напоминания вообще можно (браузер + ключ + вход). */
+  ready: boolean;
   subscribed: boolean;
   enabled: boolean;
   standalone: boolean;
   ios: boolean;
+  /** Когда отправитель последний раз успешно проходил по этому устройству. */
+  lastRunAt: number;
+  /** Последняя ошибка доставки, записанная отправителем. */
+  lastError: string;
+  /** Момент запроса «проверить доставку» или 0, если запроса нет. */
+  pendingTest: number;
 }
 
 export interface ReminderRefresh {
@@ -52,55 +76,61 @@ export interface ReminderRefresh {
   sent: boolean;
 }
 
-/** Адрес воркера и токен: напоминания отправляет только прокси-режим. */
-function serverConfig(): { base: string; token: string } | null {
-  const data = settings.data;
-  const base = String(data.proxyUrl ?? '').trim().replace(/\/+$/, '');
-  const token = String(data.appToken ?? '').trim();
-  if (normalizeModeSafe(data.mode) !== 'proxy' || !base || !token) return null;
-  return { base, token };
+/** Текущий пользователь Firebase и его Firestore — либо null, если войти некуда. */
+interface Cloud {
+  userId: string;
+  db: import('firebase/firestore').Firestore;
+  fs: FirestoreModule;
 }
 
-function normalizeModeSafe(mode: unknown): string {
-  return mode === 'proxy' ? 'proxy' : 'direct';
+async function cloud(): Promise<Cloud | null> {
+  if (!syncConfigured()) return null;
+  const userId = sync.user?.uid ?? '';
+  if (!userId) return null;
+  const firebase = await loadFirebase();
+  return { userId, db: firebase.db, fs: firebase.fsMod };
 }
 
-/** Сообщение, если напоминания некуда отправлять. */
-export function serverHint(): string {
-  return serverConfig()
-    ? ''
-    : 'Напоминания отправляет ваш прокси-воркер: в «Подключении» выберите «Свой прокси» и укажите адрес и токен приложения.';
+/** Ссылка на документ устройства: push (подписка), pushPlan (план), pushState (отметки). */
+function deviceRef(target: Cloud, collection: 'push' | 'pushPlan' | 'pushState', deviceId: string) {
+  return target.fs.doc(target.db, 'users', target.userId, collection, deviceId);
 }
 
-async function request<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
-  const server = serverConfig();
-  if (!server) throw new Error(serverHint());
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+/** Часовой пояс устройства — для диагностики в отправителе. */
+function timeZone(): string {
   try {
-    const res = await fetch(`${server.base}${path}`, {
-      method: init.method ?? 'GET',
-      headers: { 'content-type': 'application/json', 'x-app-token': server.token },
-      body: init.body === undefined ? undefined : JSON.stringify(init.body),
-      signal: controller.signal
-    });
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok) {
-      const message = typeof data.error === 'string' ? data.error : `Воркер ответил ${res.status}`;
-      throw new Error(message);
-    }
-    return data as T;
-  } catch (e) {
-    if ((e as { name?: string } | null)?.name === 'AbortError') {
-      throw new Error('Воркер не ответил за 15 секунд — проверьте адрес и сеть.');
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
   }
 }
 
-/** Идентификатор устройства для воркера: переживает перезапуск, не уходит в облако. */
+/** ISO/число/Timestamp → миллисекунды; 0 — значения нет или оно битое. */
+function parseMs(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  const stamp = value as { toMillis?: () => number } | null;
+  if (stamp && typeof stamp.toMillis === 'function') {
+    const ms = stamp.toMillis();
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  return 0;
+}
+
+/** Сообщение, если напоминания включить нельзя. Пустая строка — всё готово. */
+export function remindersHint(): string {
+  if (!syncConfigured()) {
+    return 'В этой сборке синхронизация выключена, поэтому напоминания отправить некому.';
+  }
+  if (!pushConfigured()) return NOT_CONFIGURED_HINT;
+  if (!sync.signedIn) return SIGN_IN_HINT;
+  return '';
+}
+
+/** Идентификатор устройства: переживает перезапуск и служит id документа в Firestore. */
 async function deviceKey(): Promise<string> {
   const stored = await getKv<string>(DEVICE_KEY, '');
   if (stored) return stored;
@@ -141,31 +171,49 @@ async function ensureSubscription(applicationServerKey: Uint8Array): Promise<Pus
   });
 }
 
-/** Подпись устройства — чтобы в воркере было видно, кто подписан. */
+/** Подпись устройства — чтобы в Firestore было видно, кто подписан. */
 function deviceLabel(): string {
   const ua = typeof navigator === 'undefined' ? '' : navigator.userAgent;
   return ua.includes('iPhone') ? 'iPhone' : ua.includes('iPad') ? 'iPad' : 'Браузер';
 }
-/** Включает напоминания: разрешение браузера → подписка → регистрация в воркере. */
+
+/** Кладёт подписку устройства в Firestore; повторный вызов обновляет её. */
+async function saveSubscription(target: Cloud, subscription: PushSubscription): Promise<void> {
+  const json = subscription.toJSON();
+  const endpoint = String(json.endpoint ?? subscription.endpoint ?? '');
+  const keys = json.keys ?? {};
+  if (!endpoint) {
+    throw new Error('Браузер не вернул адрес подписки — выключите и включите напоминания заново.');
+  }
+  await target.fs.setDoc(
+    deviceRef(target, 'push', await deviceKey()),
+    {
+      endpoint,
+      keys: { p256dh: String(keys.p256dh ?? ''), auth: String(keys.auth ?? '') },
+      label: deviceLabel(),
+      ua: typeof navigator === 'undefined' ? '' : navigator.userAgent,
+      timeZone: timeZone(),
+      updatedAt: new Date().toISOString()
+    },
+    { merge: true }
+  );
+}
+
+/** Включает напоминания: разрешение браузера → подписка → запись в Firestore. */
 export async function enableReminders(): Promise<ReminderRefresh> {
   const reason = unsupportedReason();
   if (reason) throw new Error(reason);
-  if (!serverConfig()) throw new Error(serverHint());
+  if (!pushConfigured()) throw new Error(NOT_CONFIGURED_HINT);
+  const target = await cloud();
+  if (!target) throw new Error(SIGN_IN_HINT);
 
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') {
     throw new Error('Браузер не разрешил уведомления. Разрешение можно вернуть в настройках сайта.');
   }
 
-  const config = await request<{ publicKey?: string }>('/api/push/config');
-  const publicKey = String(config.publicKey ?? '').trim();
-  if (!publicKey) throw new Error('Воркер не вернул VAPID-ключ — проверьте секреты VAPID_PUBLIC_KEY и VAPID_PRIVATE_KEY.');
-
-  const subscription = await ensureSubscription(b64uToBytes(publicKey));
-  await request('/api/push/subscribe', {
-    method: 'POST',
-    body: { deviceId: await deviceKey(), subscription: subscription.toJSON(), label: deviceLabel() }
-  });
+  const subscription = await ensureSubscription(b64uToBytes(VAPID_PUBLIC_KEY));
+  await saveSubscription(target, subscription);
 
   await settings.patch({
     reminders: { ...normalizeReminderSettings(settings.data.reminders), enabled: true }
@@ -174,18 +222,28 @@ export async function enableReminders(): Promise<ReminderRefresh> {
   return refreshReminders({ force: true });
 }
 
-/** Отключает напоминания и снимает подписку на этом устройстве. */
+/**
+ * Отключает напоминания на этом устройстве: снимает подписку и чистит план,
+ * чтобы отправитель больше не тратил на него запуски.
+ */
 export async function disableReminders(): Promise<void> {
   try {
     const registration = await navigator.serviceWorker.getRegistration();
     const subscription = registration ? await registration.pushManager.getSubscription() : null;
-    if (subscription) {
-      await request('/api/push/subscribe', {
-        method: 'DELETE',
-        body: { deviceId: await deviceKey(), endpoint: subscription.endpoint }
-      }).catch(() => undefined);
-      await subscription.unsubscribe().catch(() => undefined);
+    const target = await cloud().catch(() => null);
+    if (target) {
+      const deviceId = await deviceKey();
+      await target.fs.deleteDoc(deviceRef(target, 'push', deviceId)).catch(() => undefined);
+      await target.fs.deleteDoc(deviceRef(target, 'pushState', deviceId)).catch(() => undefined);
+      await target.fs
+        .setDoc(
+          deviceRef(target, 'pushPlan', deviceId),
+          { items: [], updatedAt: new Date().toISOString() },
+          { merge: true }
+        )
+        .catch(() => undefined);
     }
+    if (subscription) await subscription.unsubscribe().catch(() => undefined);
   } finally {
     await setKv(HASH_KEY, '');
     await settings.patch({
@@ -194,30 +252,40 @@ export async function disableReminders(): Promise<void> {
   }
 }
 
-/** Пересчитывает расписание и отправляет его в воркер. */
+/** Пересчитывает расписание и записывает план в Firestore. */
 export async function refreshReminders(opts: { force?: boolean } = {}): Promise<ReminderRefresh> {
   const reminders = normalizeReminderSettings(settings.data.reminders);
   if (!reminders.enabled) return { planned: 0, sent: false };
-  if (!serverConfig()) throw new Error(serverHint());
+  const target = await cloud();
+  if (!target) throw new Error(SIGN_IN_HINT);
 
-  const items = await plannedReminders();
-  const payload = items.map((item) => ({
-    at: item.at,
-    title: item.title,
-    body: item.body,
-    tag: item.tag,
-    url: item.url
-  }));
-  const hash = payload.map((item) => `${item.tag}@${item.at}`).join('|');
+  const items = toPlanItems(await plannedReminders());
+  const hash = planSignature(items, reminders.leadMinutes);
   const stored = await getKv<string>(HASH_KEY, '');
   if (!opts.force && stored === hash) return { planned: items.length, sent: false };
 
-  await request('/api/push/schedule', {
-    method: 'PUT',
-    body: { deviceId: await deviceKey(), items: payload }
-  });
+  await savePlan(target, items, reminders);
   await setKv(HASH_KEY, hash);
   return { planned: items.length, sent: true };
+}
+
+/** Пишет план устройства: список созревающих напоминаний и параметры. */
+async function savePlan(
+  target: Cloud,
+  items: ReminderPlanItem[],
+  reminders: ReminderSettings
+): Promise<void> {
+  await target.fs.setDoc(
+    deviceRef(target, 'pushPlan', await deviceKey()),
+    {
+      items,
+      leadMinutes: reminders.leadMinutes,
+      timeZone: timeZone(),
+      version: PLAN_VERSION,
+      updatedAt: new Date().toISOString()
+    },
+    { merge: true }
+  );
 }
 
 /** Ближайшие напоминания по локальным данным — без обращения к сети. */
@@ -227,15 +295,72 @@ export async function plannedReminders(now: Date = new Date()): Promise<Reminder
   return buildReminders({ events, tasks, settings: reminders, now });
 }
 
-/** Тестовое уведомление: проверяет всю цепочку до телефона. */
-export async function sendTestReminder(): Promise<{ sent: number; failed: number }> {
-  const result = await request<{ sent?: number; failed?: number }>('/api/push/test', {
-    method: 'POST',
-    body: { deviceId: await deviceKey() }
+/**
+ * Тест сразу: показывает уведомление с этого устройства через service worker.
+ * Проверяет разрешение браузера и обработчик push, но не доставку по сети.
+ */
+export async function testReminderLocally(): Promise<void> {
+  const reason = unsupportedReason();
+  if (reason) throw new Error(reason);
+  if (Notification.permission !== 'granted') {
+    throw new Error('Уведомления запрещены в браузере: включите напоминания и разрешите их.');
+  }
+  const registration = await navigator.serviceWorker.ready;
+  await registration.showNotification('Наставник', {
+    body: 'Тест: уведомления на этом устройстве работают.',
+    tag: 'test:local',
+    lang: 'ru',
+    icon: new URL('icons/icon-192.png', registration.scope).href,
+    badge: new URL('icons/icon-192.png', registration.scope).href,
+    data: { url: '#/settings' }
   });
-  return { sent: Number(result.sent ?? 0), failed: Number(result.failed ?? 0) };
 }
 
+/**
+ * Проверка доставки: отправитель увидит `testAt` в плане и пришлёт тестовое
+ * уведомление на это устройство. Приходит с задержкой cron (до ~10 минут).
+ */
+export async function requestServerTest(): Promise<void> {
+  const reminders = normalizeReminderSettings(settings.data.reminders);
+  if (!reminders.enabled) throw new Error('Сначала включите напоминания.');
+  const target = await cloud();
+  if (!target) throw new Error(SIGN_IN_HINT);
+
+  const registration = await navigator.serviceWorker.getRegistration();
+  const subscription = registration ? await registration.pushManager.getSubscription() : null;
+  if (!subscription) throw new Error('Подписка не найдена — выключите и включите напоминания заново.');
+  // Запись обновляем перед тестом: если подписку потеряли в облаке — восстановим.
+  await saveSubscription(target, subscription);
+
+  await target.fs.setDoc(
+    deviceRef(target, 'pushPlan', await deviceKey()),
+    { testAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    { merge: true }
+  );
+}
+
+/** Что отправитель записал о последнем запуске: время, ошибку и запрос теста. */
+async function readServerState(): Promise<{ lastRunAt: number; lastError: string; pendingTest: number }> {
+  const target = await cloud().catch(() => null);
+  if (!target) return { lastRunAt: 0, lastError: '', pendingTest: 0 };
+  try {
+    const deviceId = await deviceKey();
+    const [stateSnap, planSnap] = await Promise.all([
+      target.fs.getDoc(deviceRef(target, 'pushState', deviceId)),
+      target.fs.getDoc(deviceRef(target, 'pushPlan', deviceId))
+    ]);
+    const state = stateSnap.exists() ? (stateSnap.data() as Record<string, unknown>) : {};
+    const plan = planSnap.exists() ? (planSnap.data() as Record<string, unknown>) : {};
+    return {
+      lastRunAt: parseMs(state.lastRunAt),
+      lastError: typeof state.lastError === 'string' ? state.lastError : '',
+      pendingTest: parseMs(plan.testAt)
+    };
+  } catch {
+    // Нет сети или правила не пускают — карточка покажет «сервер ещё не отвечал».
+    return { lastRunAt: 0, lastError: '', pendingTest: 0 };
+  }
+}
 
 export function pushSupported(): boolean {
   return (
@@ -247,11 +372,12 @@ export function pushSupported(): boolean {
   );
 }
 
-/** Приложение открыто как установленное (на iOS только так работает push). */
 /** Состояние напоминаний для карточки в «Настройках». */
 export async function readStatus(): Promise<ReminderStatus> {
   const supported = pushSupported();
   const reminders = normalizeReminderSettings(settings.data.reminders);
+  const configured = pushConfigured();
+  const signedIn = sync.signedIn;
   let permission: NotificationPermission | 'unsupported' = 'unsupported';
   let subscribed = false;
   if (supported) {
@@ -263,23 +389,31 @@ export async function readStatus(): Promise<ReminderStatus> {
       subscribed = false;
     }
   }
+  const server = signedIn && configured ? await readServerState() : { lastRunAt: 0, lastError: '', pendingTest: 0 };
   return {
     supported,
     permission,
-    serverReady: Boolean(serverConfig()),
+    configured,
+    signedIn,
+    ready: supported && configured && signedIn,
     subscribed,
     enabled: reminders.enabled,
     standalone: isStandalone(),
-    ios: isIos()
+    ios: isIos(),
+    lastRunAt: server.lastRunAt,
+    lastError: server.lastError,
+    pendingTest: server.pendingTest
   };
 }
 
 let started = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let running = false;
+let forceNext = false;
 
-/** Пересчёт с дебаунсом: правка события не должна порождать запрос на каждую букву. */
-function scheduleRefresh(delay = LOCAL_CHANGE_DELAY_MS): void {
+/** Пересчёт с дебаунсом: правка события не должна порождать запись на каждую букву. */
+function scheduleRefresh(delay = LOCAL_CHANGE_DELAY_MS, force = false): void {
+  if (force) forceNext = true;
   if (timer !== null) return;
   timer = setTimeout(() => {
     timer = null;
@@ -290,10 +424,13 @@ function scheduleRefresh(delay = LOCAL_CHANGE_DELAY_MS): void {
 async function runRefresh(): Promise<void> {
   if (running) return;
   const reminders = normalizeReminderSettings(settings.data.reminders);
-  if (!reminders.enabled || !serverConfig()) return;
+  // Без входа писать план некуда — молча ждём следующей попытки.
+  if (!reminders.enabled || !pushConfigured() || !sync.signedIn) return;
   running = true;
+  const force = forceNext;
+  forceNext = false;
   try {
-    await refreshReminders();
+    await refreshReminders({ force });
   } catch {
     // Ошибку покажет карточка настроек: здесь молча ждём следующей попытки.
   } finally {
@@ -302,21 +439,22 @@ async function runRefresh(): Promise<void> {
 }
 
 /**
- * Запускается один раз при старте приложения. Расписание пересчитывается
- * после любой локальной правки, при возврате на вкладку, после появления
- * сети и раз в полчаса — воркер к этому времени уже мог отправить уведомления
- * и удалить их из очереди.
+ * Запускается один раз при старте приложения. План пересчитывается после любой
+ * локальной правки, при возврате на вкладку, после появления сети и раз в
+ * полчаса. Проверки по таймеру идут с `force`: отправитель мог удалить план
+ * вместе с мёртвой подпиской, и тогда его нужно записать заново даже при
+ * неизменившемся расписании.
  */
 export function initReminders(): void {
   if (started || typeof window === 'undefined') return;
   started = true;
   onLocalChange(() => scheduleRefresh());
-  window.addEventListener('online', () => scheduleRefresh(1000));
+  window.addEventListener('online', () => scheduleRefresh(1000, true));
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') scheduleRefresh(1000);
+    if (document.visibilityState === 'visible') scheduleRefresh(1000, true);
   });
-  setInterval(() => scheduleRefresh(0), HEARTBEAT_MS);
-  scheduleRefresh(1500);
+  setInterval(() => scheduleRefresh(0, true), HEARTBEAT_MS);
+  scheduleRefresh(1500, true);
 }
 
 export function isStandalone(): boolean {

@@ -14,13 +14,9 @@
  *   GET  /api/user/balance     → GET  /user/balance
  *   POST /api/chat/completions → POST /chat/completions (в т.ч. stream: true, ответ идёт потоком)
  *
- * Напоминания (модуль push.js, DeepSeek не нужен):
- *   GET    /api/push/config    — публичный VAPID-ключ и лимиты
- *   POST   /api/push/subscribe — подписка браузера на push
- *   DELETE /api/push/subscribe — снять подписку
- *   PUT    /api/push/schedule  — расписание ближайших напоминаний устройства
- *   POST   /api/push/test      — тестовое уведомление
- *   cron (раз в минуту)        — рассылка созревших напоминаний
+ * Push-напоминаний здесь больше нет: их рассылает GitHub Actions по расписанию
+ * (`.github/workflows/notify.yml` → `_push/send.mjs` → Firestore), поэтому воркер
+ * отвечает только за DeepSeek и диагностику канала.
  *
  * Диагностика: каждый запрос к /api/* пишет в лог время до заголовков DeepSeek,
  * статус upstream, объём и длительность стрима, причину обрыва чтения upstream
@@ -34,8 +30,6 @@
  * Переменные окружения (wrangler.toml [vars]):
  *   ALLOWED_ORIGINS  — список origin через запятую; пусто = разрешены все
  */
-
-import { handlePush, runScheduled } from './push.js';
 
 const DEEPSEEK_BASE = 'https://api.deepseek.com';
 const TOKEN_HEADER = 'x-app-token';
@@ -343,16 +337,6 @@ export default {
     const provided = (request.headers.get(TOKEN_HEADER) || '').trim();
     if (!safeEqual(provided, expected)) {
       return json({ error: 'Неверный или отсутствующий x-app-token' }, 401, allowOrigin);
-    }
-
-    // Напоминания обрабатываются до проверки ключа DeepSeek: push-уведомлениям
-    // он не нужен, а без VAPID-ключей или PUSH_KV модуль ответит 503 с подсказкой.
-    if (path.startsWith('/api/push/')) {
-      const answer = await handlePush(request, env, {
-        path,
-        json: (data, status) => json(data, status, allowOrigin)
-      });
-      return answer ?? json({ error: 'Не найдено' }, 404, allowOrigin);
     }
 
     // Диагностика канала: SSE-стрим с пингами, не зависящий от DeepSeek.
@@ -758,21 +742,6 @@ export default {
     }
 
     return new Response(body, { status: upstream.status, headers: resHeaders });
-  },
-
-  /**
-   * Cron Cloudflare (`[triggers] crons` в wrangler.toml): раз в минуту
-   * рассылает созревшие напоминания. Без PUSH_KV или VAPID-ключей просто
-   * пишет строку в лог — деплой без настроенных напоминаний остаётся рабочим.
-   */
-  async scheduled(event, env, ctx) {
-    // Без PUSH_KV или VAPID-ключей runScheduled сразу возвращает skipped —
-    // не пишем об этом каждую минуту, иначе лог воркера превращается в шум.
-    ctx.waitUntil(
-      runScheduled(env).catch((err) => {
-        console.log(`[push] ✖ cron: ${err instanceof Error ? err.message : String(err)}`);
-      })
-    );
   }
 };
 

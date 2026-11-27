@@ -23,8 +23,17 @@ const reminders = await load('src/lib/utils/reminders.ts');
 const { localDate } = await load('src/lib/utils/planner.ts');
 const { weekdayIndex } = await load('src/lib/utils/tasks.ts');
 
-const { DEFAULT_REMINDERS, buildReminders, leadLabel, normalizeReminderSettings, reminderLabel, remindersSummary } =
-  reminders;
+const {
+  DEFAULT_REMINDERS,
+  REMINDER_MAX_ITEMS,
+  buildReminders,
+  leadLabel,
+  normalizeReminderSettings,
+  planSignature,
+  reminderLabel,
+  remindersSummary,
+  toPlanItems
+} = reminders;
 
 const at = (iso, hours, minutes = 0) => {
   const [y, m, d] = iso.split('-').map(Number);
@@ -196,6 +205,33 @@ console.log('\nвыключенные разделы');
   });
   check(items.length === 0, 'ни событий, ни дел', JSON.stringify(tags(items)));
 
+  const onlyEvents = build({
+    settings: { tasks: false },
+    events: [{ id: 'e4', title: 'Созвон', date: TODAY, time: '14:00' }],
+    tasks: [{ id: 't9', title: 'Зарядка', days: [day], onceDate: '', time: '18:00', done: [] }]
+  });
+  check(
+    tags(onlyEvents).every((tag) => tag.startsWith('event:')),
+    'задачи выключены — только события',
+    JSON.stringify(tags(onlyEvents))
+  );
+}
+
+// --- 10. горизонт и прошедшее время ---
+console.log('\nгоризонт');
+{
+  const far = build({
+    settings: { horizonHours: 6 },
+    events: [{ id: 'e5', title: 'Через два дня', date: addDays(TODAY, 2), time: '12:00' }]
+  });
+  check(far.length === 0, 'событие за горизонтом не планируется', JSON.stringify(tags(far)));
+
+  const past = build({ events: [{ id: 'e6', title: 'Уже прошло', date: TODAY, time: '07:00' }] });
+  check(past.length === 0, 'прошедшее событие не планируется', JSON.stringify(tags(past)));
+
+  const soon = build({ events: [{ id: 'e7', title: 'Через 5 минут', date: TODAY, time: '08:05' }] });
+  check(soon.length === 0, 'напоминание за 15 минут до события через 5 минут уже не нужно', JSON.stringify(tags(soon)));
+}
 
 // --- 11. повтор и сортировка ---
 console.log('\nповтор и порядок');
@@ -242,6 +278,48 @@ console.log('\nподписи');
   check(leadLabel(60) === 'через час', 'час', leadLabel(60));
   check(leadLabel(90) === 'через 1 ч 30 мин', 'полтора часа', leadLabel(90));
   const label = reminderLabel({ at: at(TODAY, 14, 0), title: 'Созвон' }, NOW);
+  check(label === 'Сегодня 14:00 · Созвон', 'подпись ближайшего напоминания', label);
+  check(remindersSummary(base) === 'события и дела · за 15 мин', 'сводка настроек', remindersSummary(base));
+  check(remindersSummary({ ...base, events: false, tasks: false }) === 'выключены', 'без разделов — выключены');
+}
+
+// --- 15. план для Firestore ---
+console.log('\nплан для Firestore');
+{
+  check(
+    DEFAULT_REMINDERS.horizonHours === 336,
+    'по умолчанию горизонт — две недели',
+    String(DEFAULT_REMINDERS.horizonHours)
+  );
+  check(normalizeReminderSettings({ horizonHours: 9999 }).horizonHours === 336, 'горизонт ограничен 336 часами');
+  check(REMINDER_MAX_ITEMS >= 400, 'в план влезает две недели дел', String(REMINDER_MAX_ITEMS));
+
+  const longRange = build({
+    settings: { horizonHours: 336 },
+    tasks: [{ id: 't11', title: 'Зарядка', days: [0, 1, 2, 3, 4, 5, 6], onceDate: '', time: '18:00', done: [] }]
+  });
+  check(
+    tags(longRange).includes(`task:t11:${addDays(TODAY, 10)}`),
+    'дело через 10 дней попадает в план',
+    JSON.stringify(tags(longRange).slice(-3))
+  );
+
+  const items = build({ events: [{ id: 'e9', title: 'Созвон', date: TODAY, time: '14:00' }] });
+  const plan = toPlanItems(items);
+  check(plan.length === 1, 'toPlanItems переносит элементы', JSON.stringify(plan));
+  check(plan[0]?.key === `event:e9:${TODAY}`, 'ключ дедупликации — tag', plan[0]?.key);
+  check(plan[0]?.tag === plan[0]?.key, 'tag и key совпадают');
+  check(!Number.isNaN(Date.parse(plan[0]?.at ?? '')), 'момент в плане — ISO-строка', plan[0]?.at);
+  check(plan[0]?.url === '#/calendar', 'маршрут перенесён', plan[0]?.url);
+
+  check(planSignature(plan, 15) === planSignature(toPlanItems(items), 15), 'отпечаток стабилен');
+  check(planSignature(plan, 15) !== planSignature(plan, 30), 'смена leadMinutes меняет отпечаток');
+  check(planSignature([], 0) === '0|', 'пустой план — пустой отпечаток', planSignature([], 0));
+  check(
+    toPlanItems([{ at: Number.NaN, title: 'x', body: '', tag: 'bad', kind: 'event', url: '' }]).length === 0,
+    'битая дата в плане отбрасывается'
+  );
+}
 
 console.log(`\n${total - failures.length}/${total} проверок пройдено`);
 if (failures.length) {
@@ -250,35 +328,3 @@ if (failures.length) {
   process.exit(1);
 }
 
-  check(label === 'Сегодня 14:00 · Созвон', 'подпись ближайшего напоминания', label);
-  check(remindersSummary(base) === 'события и дела · за 15 мин', 'сводка настроек', remindersSummary(base));
-  check(remindersSummary({ ...base, events: false, tasks: false }) === 'выключены', 'без разделов — выключены');
-}
-
-  const onlyEvents = build({
-    settings: { tasks: false },
-    events: [{ id: 'e4', title: 'Созвон', date: TODAY, time: '14:00' }],
-    tasks: [{ id: 't9', title: 'Зарядка', days: [day], onceDate: '', time: '18:00', done: [] }]
-  });
-  check(
-    tags(onlyEvents).every((tag) => tag.startsWith('event:')),
-    'задачи выключены — только события',
-    JSON.stringify(tags(onlyEvents))
-  );
-}
-
-// --- 10. горизонт и прошедшее время ---
-console.log('\nгоризонт');
-{
-  const far = build({
-    settings: { horizonHours: 6 },
-    events: [{ id: 'e5', title: 'Через два дня', date: addDays(TODAY, 2), time: '12:00' }]
-  });
-  check(far.length === 0, 'событие за горизонтом не планируется', JSON.stringify(tags(far)));
-
-  const past = build({ events: [{ id: 'e6', title: 'Уже прошло', date: TODAY, time: '07:00' }] });
-  check(past.length === 0, 'прошедшее событие не планируется', JSON.stringify(tags(past)));
-
-  const soon = build({ events: [{ id: 'e7', title: 'Через 5 минут', date: TODAY, time: '08:05' }] });
-  check(soon.length === 0, 'напоминание за 15 минут до события через 5 минут уже не нужно', JSON.stringify(tags(soon)));
-}
