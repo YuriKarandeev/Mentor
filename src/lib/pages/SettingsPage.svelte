@@ -263,7 +263,7 @@
 
   async function exportData(): Promise<void> {
     const payload = {
-      version: 3,
+      version: 4,
       exportedAt: new Date().toISOString(),
       topics: await db.topics.toArray(),
       plans: await db.plans.toArray(),
@@ -271,6 +271,7 @@
       notes: await db.notes.toArray(),
       memory: await db.memory.toArray(),
       events: await db.events.toArray(),
+      tasks: await db.tasks.toArray(),
       kv: await db.kv.toArray()
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -302,7 +303,7 @@
       const json = JSON.parse(await file.text()) as Record<string, unknown[]>;
       await db.transaction(
         'rw',
-        [db.topics, db.plans, db.messages, db.notes, db.memory, db.events, db.kv],
+        [db.topics, db.plans, db.messages, db.notes, db.memory, db.events, db.tasks, db.kv],
         async () => {
           if (Array.isArray(json.topics)) await db.topics.bulkPut(normalizeRows(json.topics));
           if (Array.isArray(json.plans)) await db.plans.bulkPut(normalizeRows(json.plans));
@@ -310,6 +311,7 @@
           if (Array.isArray(json.notes)) await db.notes.bulkPut(normalizeRows(json.notes));
           if (Array.isArray(json.memory)) await db.memory.bulkPut(json.memory as never[]);
           if (Array.isArray(json.events)) await db.events.bulkPut(normalizeRows(json.events));
+          if (Array.isArray(json.tasks)) await db.tasks.bulkPut(normalizeRows(json.tasks));
           if (Array.isArray(json.kv)) {
             const rows = (json.kv as Array<Record<string, unknown>>).map((row) =>
               row.key === 'profile' ? { ...row, dirty: 1 } : row

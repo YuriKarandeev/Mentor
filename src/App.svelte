@@ -6,6 +6,7 @@
   import LibraryPage from './lib/pages/LibraryPage.svelte';
   import NewTopicPage from './lib/pages/NewTopicPage.svelte';
   import SettingsPage from './lib/pages/SettingsPage.svelte';
+  import TasksPage from './lib/pages/TasksPage.svelte';
   import TopicPage from './lib/pages/TopicPage.svelte';
   import TopicsPage from './lib/pages/TopicsPage.svelte';
   import { router } from './lib/router.svelte';
@@ -19,6 +20,7 @@
   const NAV = [
     { path: '/', key: 'topics', label: 'Темы', icon: '📚' },
     { path: '/calendar', key: 'calendar', label: 'Календарь', icon: '🗓' },
+    { path: '/tasks', key: 'tasks', label: 'Дела', icon: '✅' },
     { path: '/assistant', key: 'assistant', label: 'Помощник', icon: '🤖' },
     { path: '/library', key: 'library', label: 'Библиотека', icon: '📖' },
     { path: '/settings', key: 'settings', label: 'Настройки', icon: '⚙️' }
@@ -108,6 +110,8 @@
         <NewTopicPage />
       {:else if route.name === 'calendar'}
         <CalendarPage />
+      {:else if route.name === 'tasks'}
+        <TasksPage />
       {:else if route.name === 'assistant'}
         <AssistantPage />
       {:else if route.name === 'library'}

@@ -142,12 +142,12 @@ check(chunks.length === 3 && chunks[2].length === 100, 'чанкование р�
 check(model.chunk([], 10).length === 0, 'пустой список не даёт батчей');
 
 check(
-  model.SYNCED_COLLECTIONS.length === 6 &&
-    ['topics', 'plans', 'messages', 'notes', 'memory', 'events'].every((name) =>
+  model.SYNCED_COLLECTIONS.length === 7 &&
+    ['topics', 'plans', 'messages', 'notes', 'memory', 'events', 'tasks'].every((name) =>
       model.SYNCED_COLLECTIONS.includes(name)
     ) &&
     !model.SYNCED_COLLECTIONS.includes('kv'),
-  'в облако синхронизируются только данные (включая события), но не таблица настроек kv'
+  'в облако синхронизируются только данные (события и дела), но не таблица настроек kv'
 );
 
 /* --- события календаря --- */
@@ -179,6 +179,44 @@ check(brokenEvent.date === '', 'событие с 30 февраля не пол�
 const allDayEvent = model.fromRemoteEvent('ev_3', { title: 'x', date: '2026-11-28', time: '10:00', allDay: true, updatedAt: 5 });
 check(allDayEvent.allDay && allDayEvent.time === '', 'allDay из облака очищает время');
 check(model.collectionForTombstone('event') === 'events', 'надгробие события указывает на коллекцию events');
+
+/* --- дела с повтором --- */
+
+const taskRow = {
+  id: 'task_1',
+  title: 'Зарядка',
+  notes: '10 минут',
+  days: [0, 2, 4],
+  onceDate: '',
+  time: '08:00',
+  done: ['2026-11-27'],
+  createdAt: 1000,
+  updatedAt: 3000,
+  dirty: 1
+};
+const remoteTask = model.toRemoteTask(taskRow);
+check(!('dirty' in remoteTask) && remoteTask.days.join() === '0,2,4', 'дело уходит в облако без dirty');
+check(remoteTask.done.join() === '2026-11-27', 'история отметок дела уходит в облако');
+check(remoteTask.schemaVersion === model.CLOUD_SCHEMA_VERSION, 'у дела есть версия схемы облака');
+
+const restoredTask = model.fromRemoteTask('task_1', { ...remoteTask, srvUpdatedAt: { seconds: 1 } });
+check(restoredTask.id === 'task_1' && restoredTask.dirty === 0 && restoredTask.updatedAt === 3000, 'дело из облака приходит без dirty');
+check(restoredTask.days.join() === '0,2,4' && restoredTask.done.join() === '2026-11-27', 'расписание и отметки сохраняются');
+
+const onceRemote = model.fromRemoteTask('task_2', {
+  title: 'Экзамен',
+  days: [4],
+  onceDate: '2026-11-28',
+  updatedAt: 5
+});
+check(onceRemote.onceDate === '2026-11-28' && onceRemote.days.length === 0, 'разовая дата важнее дней недели и в облаке');
+
+const brokenTask = model.fromRemoteTask('task_3', { title: 'x', days: [9, 'пн'], updatedAt: 5 });
+check(brokenTask.days.length === 0, 'битые дни недели из облака отбрасываются — движок пропустит дело');
+check(model.collectionForTombstone('task') === 'tasks', 'надгробие дела указывает на коллекцию tasks');
+
+const messyTask = model.toRemoteTask({ ...taskRow, done: ['2026-02-30', '2026-11-27'] });
+check(messyTask.done.length === 1, 'битые отметки не попадают в облако');
 
 const messy = {
   id: 'm_1',

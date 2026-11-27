@@ -2,11 +2,29 @@
  * Чистые функции обмена с облаком: никакого Firebase и Dexie внутри,
  * поэтому модуль легко проверять отдельным скриптом (npm run test:sync).
  */
-import type { MemoryRow, Note, Plan, PlannerEvent, Profile, StoredMessage, Topic, Tombstone } from '../db/db';
+import type {
+  MemoryRow,
+  Note,
+  Plan,
+  PlannerEvent,
+  PlannerTask,
+  Profile,
+  StoredMessage,
+  Topic,
+  Tombstone
+} from '../db/db';
 import { AI_MAX_NOTES, AI_MAX_TITLE, text, validDate, validTime } from '../utils/planner.ts';
+import { normalizeDoneDates, normalizeDays } from '../utils/tasks.ts';
 
 /** Коллекции Firestore внутри users/{uid}. */
-export type SyncedCollection = 'topics' | 'plans' | 'messages' | 'notes' | 'memory' | 'events';
+export type SyncedCollection =
+  | 'topics'
+  | 'plans'
+  | 'messages'
+  | 'notes'
+  | 'memory'
+  | 'events'
+  | 'tasks';
 
 export const SYNCED_COLLECTIONS: SyncedCollection[] = [
   'topics',
@@ -14,7 +32,8 @@ export const SYNCED_COLLECTIONS: SyncedCollection[] = [
   'messages',
   'notes',
   'memory',
-  'events'
+  'events',
+  'tasks'
 ];
 
 export const COLLECTION_PROFILE = 'profile';
@@ -46,6 +65,8 @@ export function collectionForTombstone(type: Tombstone['type']): string {
       return COLLECTION_PROFILE;
     case 'event':
       return 'events';
+    case 'task':
+      return 'tasks';
   }
 }
 
@@ -173,6 +194,45 @@ export function fromRemoteEvent(id: string, data: Record<string, unknown>): Plan
     endTime: allDay || !endTime || endTime <= time ? '' : endTime,
     allDay,
     notes: text(data.notes, AI_MAX_NOTES),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+/**
+ * Дело в облако. `done` — история отметок, поэтому она тоже уходит:
+ * иначе на втором устройстве пропадёт, что сделано вчера.
+ */
+export function toRemoteTask(task: PlannerTask): Record<string, unknown> {
+  return {
+    title: task.title,
+    notes: task.notes,
+    days: normalizeDays(task.days),
+    onceDate: task.onceDate || '',
+    time: task.time,
+    done: normalizeDoneDates(task.done),
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+/**
+ * Документ облака → дело. Расписание нормализуется: без дней и без даты
+ * дело не выполняется никогда, такие записи движок отбрасывает.
+ */
+export function fromRemoteTask(id: string, data: Record<string, unknown>): PlannerTask {
+  const updatedAt = pickUpdatedAt(data);
+  const onceDate = validDate(data.onceDate);
+  return {
+    id,
+    title: text(data.title, AI_MAX_TITLE),
+    notes: text(data.notes, AI_MAX_NOTES),
+    days: onceDate ? [] : normalizeDays(data.days),
+    onceDate,
+    time: validTime(data.time),
+    done: normalizeDoneDates(data.done),
     createdAt: Number(data.createdAt ?? updatedAt),
     updatedAt,
     dirty: 0

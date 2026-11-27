@@ -2,12 +2,13 @@ import { z } from 'zod';
 import { AI_MAX_ACTIONS, AI_MAX_NOTES, AI_MAX_TITLE } from '../utils/planner.ts';
 
 /**
- * Инструмент помощника календаря. В отличие от «Ассистента», который просил
- * модель вернуть JSON текстом, здесь используется function calling: аргументы
- * приходят строкой JSON, разбираются zod-схемой и только потом применяются.
+ * Инструмент помощника: календарь и дела. В отличие от «Ассистента», который
+ * просил модель вернуть JSON текстом, здесь используется function calling:
+ * аргументы приходят строкой JSON, разбираются zod-схемой и только потом
+ * применяются.
  *
  * `actions` описаны свободно (`unknown[]`): мусор вроде неизвестного типа
- * отбрасывает `normalizeEventAction`, а не роняет весь ответ.
+ * отбрасывает `normalizeEventAction` / `normalizeTaskAction`, а не роняет ответ.
  */
 export const plannerReplySchema = z.object({
   reply: z.string().max(1500),
@@ -24,7 +25,7 @@ export const PLANNER_ACTIONS_TOOL = {
   function: {
     name: 'planner_actions',
     description:
-      'Ответить пользователю и, если он прямо просит, изменить события календаря. Вызывай инструмент на каждый ответ помощника; без просьбы что-то изменить оставляй actions пустым.',
+      'Ответить пользователю и, если он прямо просит, изменить события календаря и дела. Вызывай инструмент на каждый ответ помощника; без просьбы что-то изменить оставляй actions пустым.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -44,24 +45,47 @@ export const PLANNER_ACTIONS_TOOL = {
             properties: {
               type: {
                 type: 'string',
-                enum: ['event.create', 'event.update', 'event.delete'],
-                description: 'Что сделать с календарём.'
+                enum: [
+                  'event.create',
+                  'event.update',
+                  'event.delete',
+                  'task.create',
+                  'task.update',
+                  'task.delete',
+                  'task.done'
+                ],
+                description: 'Что сделать: событие календаря (event.*) или дело (task.*).'
               },
               id: {
                 type: 'string',
-                description: 'id существующего события — только для event.update и event.delete.'
+                description:
+                  'id существующего события или дела — для event.update/event.delete и task.update/task.delete/task.done.'
               },
               title: {
                 type: 'string',
-                description: `Название события, до ${AI_MAX_TITLE} символов.`
+                description: `Название события или дела, до ${AI_MAX_TITLE} символов.`
               },
-              date: { type: 'string', description: 'Дата в формате ГГГГ-ММ-ДД.' },
+              date: {
+                type: 'string',
+                description:
+                  'Дата в формате ГГГГ-ММ-ДД. Для дела с date создаётся разовое дело; для task.done — день отметки.'
+              },
+              days: {
+                type: 'array',
+                items: { type: 'integer', minimum: 0, maximum: 6 },
+                description:
+                  'Дни недели повтора дела: 0 — понедельник, 1 — вторник, … 6 — воскресенье. Для «каждый день» — все семь.'
+              },
+              done: {
+                type: 'boolean',
+                description: 'Для task.done: true — отметить выполненным, false — снять отметку.'
+              },
               time: { type: 'string', description: 'Начало в 24-часовом формате ЧЧ:ММ.' },
               endTime: { type: 'string', description: 'Окончание ЧЧ:ММ, если названо.' },
               allDay: { type: 'boolean', description: 'true — событие на весь день.' },
               notes: {
                 type: 'string',
-                description: `Заметка к событию, до ${AI_MAX_NOTES} символов.`
+                description: `Заметка к событию или делу, до ${AI_MAX_NOTES} символов.`
               }
             }
           }

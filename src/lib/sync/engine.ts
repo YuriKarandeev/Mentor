@@ -39,6 +39,7 @@ import {
   collectionForTombstone,
   docIdForTombstone,
   fromRemoteEvent,
+  fromRemoteTask,
   pickUpdatedAt,
   shouldApply,
   toRemoteEvent,
@@ -47,6 +48,7 @@ import {
   toRemoteNote,
   toRemotePlan,
   toRemoteProfile,
+  toRemoteTask,
   toRemoteTopic,
   toPlain,
   withoutServerFields,
@@ -434,6 +436,15 @@ async function applyRemote(
       await db.events.put(row);
       return true;
     }
+    case 'tasks': {
+      const row = fromRemoteTask(id, data);
+      // Без названия и расписания дело бесполезно — такое не сохраняем.
+      if (!row.title || (row.days.length === 0 && !row.onceDate)) return false;
+      const local = await db.tasks.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.tasks.put(row);
+      return true;
+    }
   }
 }
 
@@ -553,6 +564,12 @@ async function applyTombstone(type: SyncEntity, refId: string, deletedAt: number
       await db.events.delete(refId);
       return true;
     }
+    case 'task': {
+      const local = await db.tasks.get(refId);
+      if (!local || deletedAt < local.updatedAt) return false;
+      await db.tasks.delete(refId);
+      return true;
+    }
     case 'profile': {
       const row = await db.kv.get(PROFILE_KEY);
       const local = row?.value as Profile | undefined;
@@ -624,6 +641,10 @@ async function collectDirty(name: SyncedCollection): Promise<PushRow[]> {
     case 'events': {
       const rows = await db.events.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
       return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteEvent(row) }));
+    }
+    case 'tasks': {
+      const rows = await db.tasks.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteTask(row) }));
     }
   }
 }
@@ -746,6 +767,7 @@ export async function wipeCloud(): Promise<void> {
   const noteIds = (await db.notes.toCollection().primaryKeys()) as string[];
   const memoryIds = (await db.memory.toCollection().primaryKeys()) as string[];
   const eventIds = (await db.events.toCollection().primaryKeys()) as string[];
+  const taskIds = (await db.tasks.toCollection().primaryKeys()) as string[];
 
   rows.push(...topicIds.map((id) => tombstoneOf('topic', id, ts)));
   rows.push(...planIds.map((id) => tombstoneOf('plan', id, ts)));
@@ -753,6 +775,7 @@ export async function wipeCloud(): Promise<void> {
   rows.push(...noteIds.map((id) => tombstoneOf('note', id, ts)));
   rows.push(...memoryIds.map((id) => tombstoneOf('memory', id, ts)));
   rows.push(...eventIds.map((id) => tombstoneOf('event', id, ts)));
+  rows.push(...taskIds.map((id) => tombstoneOf('task', id, ts)));
   if (await db.kv.get(PROFILE_KEY)) rows.push(tombstoneOf('profile', PROFILE_DOC_ID, ts));
 
   if (rows.length > 0) await db.tombstones.bulkPut(rows);

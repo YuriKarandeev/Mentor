@@ -3,15 +3,15 @@
   import { ApiError } from '../api/deepseek';
   import {
     applyPlannerActions,
-    describeEventActions,
-    type EventChangeSet
+    describePlannerActions,
+    type EventChangeSet,
+    type TaskChangeSet
   } from '../api/planner-actions';
   import { buildPlannerContext } from '../api/prompts';
-  import { allEvents, applyEventChanges } from '../db/db';
+  import { allEvents, allTasks, applyPlannerChanges } from '../db/db';
   import { router } from '../router.svelte';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
-  import { plural } from '../utils/format';
   import Markdown from '../components/Markdown.svelte';
   import Composer from '../components/Composer.svelte';
 
@@ -24,7 +24,7 @@
     /** Что пропущено: несуществующий id, битая дата, лимит действий. */
     skipped?: string[];
     /** Обратные операции для кнопки «Отменить». */
-    undo?: EventChangeSet;
+    undo?: { events: EventChangeSet; tasks: TaskChangeSet };
     undone?: boolean;
     error?: string;
   }
@@ -32,8 +32,8 @@
   const SUGGESTIONS = [
     'Что у меня на этой неделе?',
     'Поставь на завтра в 18:00 занятие по SQL',
-    'Перенеси ближайшее занятие на час позже',
-    'Освободи вечер пятницы'
+    'Добавь дело «зарядка» каждый день в 8:00',
+    'Отметь, что я сделал зарядку'
   ];
 
   let messages = $state<ChatNote[]>([]);
@@ -70,24 +70,31 @@
     abort = new AbortController();
 
     try {
-      const events = await allEvents();
+      const [events, tasks] = await Promise.all([allEvents(), allTasks()]);
       const result = await plannerTurn({
         settings: settings.data,
-        context: buildPlannerContext(events),
+        context: buildPlannerContext({ events, tasks }),
         history,
         signal: abort.signal
       });
 
-      const plan = applyPlannerActions(result.actions, events);
-      if (plan.changes.put.length > 0 || plan.changes.remove.length > 0) {
-        await applyEventChanges(plan.changes);
-      }
+      const plan = applyPlannerActions(result.actions, { events, tasks });
+      const { changes } = plan;
+      const touched =
+        changes.events.put.length +
+        changes.events.remove.length +
+        changes.tasks.put.length +
+        changes.tasks.remove.length;
+      if (touched > 0) await applyPlannerChanges(changes);
 
       const note: ChatNote = {
         id: nextId(),
         role: 'assistant',
         text: result.reply,
-        actions: plan.applied.length > 0 ? describeEventActions(result.actions, events) : undefined,
+        actions:
+          plan.applied.length > 0
+            ? describePlannerActions(result.actions, { events, tasks })
+            : undefined,
         skipped: plan.skipped.length > 0 ? plan.skipped : undefined,
         undo: plan.applied.length > 0 ? plan.undo : undefined,
         error: result.error
@@ -96,9 +103,7 @@
 
       if (plan.applied.length > 0) {
         const count = plan.applied.length;
-        toasts.success(
-          `Календарь обновлён: ${count} ${plural(count, 'изменение', 'изменения', 'изменений')}`
-        );
+        toasts.success(`Записано изменений: ${count}`);
       }
     } catch (e) {
       const message =
@@ -126,7 +131,7 @@
   async function undo(note: ChatNote): Promise<void> {
     if (!note.undo || note.undone) return;
     try {
-      await applyEventChanges(note.undo);
+      await applyPlannerChanges(note.undo);
       messages = messages.map((m) => (m.id === note.id ? { ...m, undone: true } : m));
       toasts.success('Изменения отменены');
     } catch (e) {
@@ -138,9 +143,9 @@
 <div class="page">
   <header class="page-head">
     <div>
-      <h1>Помощник календаря</h1>
+      <h1>Помощник календаря и дел</h1>
       <p class="muted small">
-        Спросите словами — события появятся в календаре. Любую пачку изменений можно отменить.
+        Спросите словами — события и дела появятся в календаре. Любую пачку изменений можно отменить.
       </p>
     </div>
     <button class="btn btn-sm" onclick={() => router.go('/calendar')}>Открыть календарь</button>
@@ -220,7 +225,7 @@
         placeholder="Например: поставь на завтра созвон в 10:00"
       />
       <p class="mute tiny hint">
-        Помощник видит ближайшие 14 дней и меняет только события календаря.
+        Помощник видит ближайшие 14 дней, события и дела с повтором — и меняет только их.
       </p>
     </div>
   </div>

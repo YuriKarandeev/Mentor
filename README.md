@@ -23,14 +23,19 @@ Cloudflare, тогда ключ остаётся на сервере: он пр�
   с датой, временем и заметкой. Помощник понимает просьбы вроде «поставь на завтра созвон в 10:00»:
   модель возвращает действия `event.create/update/delete`, приложение применяет всю пачку и показывает
   «Отменить». События без настоящей даты не создаются никогда.
+- **Дела с повтором.** Неделя с днями и галочками: дело можно поставить на конкретные дни
+  («пн, ср, пт»), на будни, на выходные или разово на дату. Отметка «сделано» хранится по дням,
+  поэтому дело не исчезает после первого выполнения. Помощник умеет `task.create/update/delete/done`
+  («добавь зарядку каждый день в 8:00», «отметь, что я сделал зарядку»), а список дел выбранного
+  дня виден и в календаре.
 - **Переезд из «Ассистента».** «Настройки» → «Загрузить копию «Ассистента»» принимает JSON-экспорт
   старого планера и переносит события календаря; повторный импорт ничего не задваивает.
 - **Библиотека.** По названию книги приложение делает разбор: ключевые идеи, применение, вопросы самопроверки, источники.
   Сохранённые конспекты в библиотеке и во вкладке «Конспекты» темы свёрнуты до названия: текст раскрывается
   кликом (или Enter/Space с клавиатуры) и рендерится только в раскрытом виде.
 - **Настройки.** Ключ DeepSeek API, модель, глубина рассуждений (`low`/`high`/`max`), веб-поиск (только для `deepseek-flash`), тема оформления, профиль, экспорт/импорт JSON, полная очистка. Прокси-режим (адрес воркера и `APP_TOKEN`) — в дополнительных настройках (`?advanced=1`).
-- **Синхронизация (опционально).** Вход через Google — темы, планы, чаты, конспекты, память, события календаря
-  и профиль зеркалятся в Firestore и подтягиваются на других устройствах. Ключ DeepSeek, токен прокси и настройки
+- **Синхронизация (опционально).** Вход через Google — темы, планы, чаты, конспекты, память, события календаря,
+  дела с повтором и профиль зеркалятся в Firestore и подтягиваются на других устройствах. Ключ DeepSeek, токен прокси и настройки
   устройства в облако не уходят; без входа приложение работает как раньше. Подробности — [`docs/SYNC.md`](docs/SYNC.md).
 - **PWA.** Установка на телефон и десктоп, офлайн-кеш оболочки, обновление в фоне.
 
@@ -53,6 +58,7 @@ npm run test:stream # тексты ошибок стрима (без брауз�
 npm run test:conn  # прямой режим и прокси: пути, заголовки, сторож стрима
 npm run test:plan  # связка «пункт плана ↔ конспект» и промпт конспекта
 npm run test:planner # календарь: даты, действия помощника, промпт и лимиты
+npm run test:tasks  # дела: дни недели, отметки по дням, действия task.* и промпт
 npm run build      # dist/
 npm run smoke      # проверка собранного dist без запуска сервера
 npm run preview    # локальный просмотр сборки
@@ -100,7 +106,7 @@ npm run probe:book -- --help   # диагностика обрыва стрим�
 Живой адрес: **https://yurikarandeev.github.io/Mentor/**
 
 Workflow `.github/workflows/deploy.yml` собирает проект и публикует `dist` при пуше в `main`
-(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → `npm run test:conn` → `npm run test:plan` → иконки → `npm run build` → `npm run smoke`).
+(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → `npm run test:conn` → `npm run test:plan` → `npm run test:planner` → `npm run test:tasks` → иконки → `npm run build` → `npm run smoke`).
 `BASE_PATH` подставляется автоматически: `/<repo>/`. Роутинг — hash-based, поэтому deep links
 работают без серверных rewrite-правил.
 
@@ -134,33 +140,40 @@ src/
   App.svelte               каркас: сайдбар (≥900px) и нижняя навигация
   app.css                  токены темы, кнопки, карточки, стили markdown
   lib/
-    router.svelte.ts       hash-роутер (#/topics, #/topic/<id>/<tab>, #/library, #/settings)
+    router.svelte.ts       hash-роутер (#/topics, #/topic/<id>/<tab>, #/calendar, #/tasks, #/assistant, #/library, #/settings)
     theme.ts               применение темы (dark/light/system)
     api/
       conn.ts              выбор соединения: прямой ключ (api.deepseek.com) или прокси
       deepseek.ts          chatOnce / chatStream / listModels / getBalance, разбор SSE
       agent.ts             сценарии: план, ход диалога, память, профиль, разбор книги, конспект пункта
-      prompts.ts           системные промпты наставника, методиста, памяти, конспекта пункта
+      prompts.ts           системные промпты наставника, методиста, памяти, конспекта пункта, помощника
       tools.ts             схемы инструментов (zod): save_plan, update_profile + веб-инструменты
+      planner-tools.ts     инструмент помощника planner_actions (события и дела)
+      planner-actions.ts   разбор действий event.* / task.* в безопасный вид
+      planner-apply.ts     применение пачки действий и обратный набор для «Отменить»
       types.ts             типы ответов API
-    db/db.ts               Dexie v2: topics, plans, messages, notes, memory, kv, tombstones (+ updatedAt/dirty)
+    db/db.ts               Dexie v4: topics, plans, messages, notes, memory, events, tasks, kv, tombstones (+ updatedAt/dirty)
     utils/                 ids, format, markdown, plain (снимает прокси $state перед записью в IndexedDB),
-                           plan-note (связка «пункт плана ↔ заметка-конспект» по тегу)
+                           plan-note (связка «пункт плана ↔ заметка-конспект» по тегу),
+                           planner (даты и время событий), tasks (дни недели и отметки дел)
     sync/                  синхронизация: config, firebase (ленивый SDK), model (чистые функции), engine, errors, state
     stores/                settings, profile, toast (runes; данные — в IndexedDB, kv)
-    components/            Markdown, MessageBubble, Composer, PlanView, ItemSummary, NoteCard, Toasts
-    pages/                 Topics, NewTopic, Topic, Library, Settings
+    components/            Markdown, MessageBubble, Composer, PlanView, ItemSummary, NoteCard, Toasts,
+                           EventEditor (событие), TaskEditor (дело)
+    pages/                 Topics, NewTopic, Topic, Library, Settings, Calendar, Tasks, Assistant
 worker/                    Cloudflare Worker — необязательный прокси DeepSeek
 firestore.rules            правила доступа к данным пользователя
 scripts/gen-icons.mjs      генератор PNG-иконок (zlib, без зависимостей)
 scripts/test-sync.mjs      проверки логики синхронизации без Firebase
 scripts/test-conn.mjs      прямой режим и прокси: пути, заголовки, сторож стрима
 scripts/test-plan-note.mjs связка «пункт плана ↔ конспект» и промпт конспекта
+scripts/test-planner.mjs   календарь: даты, действия помощника, промпт
+scripts/test-tasks.mjs     дела: дни недели, отметки по дням, действия task.*
 ```
 
 ## Данные и приватность
 
-- Всё содержимое (темы, планы, сообщения, заметки, память, профиль) хранится в IndexedDB браузера.
+- Всё содержимое (темы, планы, сообщения, заметки, память, профиль, события, дела) хранится в IndexedDB браузера.
 - Без входа в аккаунт данные никуда не отправляются, кроме запросов к модели.
 - Со входом через Google копия перечисленных данных лежит в вашем проекте Firebase (`users/<uid>/…`),
   доступ — только владельцу по правилам [`firestore.rules`](firestore.rules).
@@ -181,4 +194,6 @@ scripts/test-plan-note.mjs связка «пункт плана ↔ конспе
 - Синхронизация не работает в реальном времени: устройства сходятся при возврате фокуса,
   по кнопке «Синхронизировать сейчас» или в течение минуты. Конфликты решаются по `updatedAt`
   (last-write-wins), поэтому одновременная правка одного пункта на двух устройствах
-  оставит только последнюю версию. Ограничения и квоты — в [`docs/SYNC.md`](docs/SYNC.md).
+  оставит только последнюю версию. Это же касается отметок дел: история `done` едет одним
+  массивом, и одновременная отметка разных дней на двух устройствах оставит одну версию.
+  Ограничения и квоты — в [`docs/SYNC.md`](docs/SYNC.md).

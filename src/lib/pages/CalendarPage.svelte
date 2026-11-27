@@ -1,6 +1,16 @@
 <script lang="ts">
   import EventEditor from '../components/EventEditor.svelte';
-  import { addEvent, eventsBetween, removeEvent, updateEvent, type PlannerEvent } from '../db/db';
+  import {
+    addEvent,
+    allTasks,
+    eventsBetween,
+    removeEvent,
+    toggleTaskDone,
+    updateEvent,
+    type PlannerEvent,
+    type PlannerTask
+  } from '../db/db';
+  import { router } from '../router.svelte';
   import { toasts } from '../stores/toast.svelte';
   import { sync } from '../sync/state.svelte';
   import {
@@ -10,6 +20,7 @@
     formatDateHuman,
     todayIso
   } from '../utils/planner';
+  import { isTaskDone, repeatLabel, tasksForDay } from '../utils/tasks';
 
   const MONTHS = [
     'январь',
@@ -40,6 +51,7 @@
   let cursor = $state(firstOfMonth(new Date()));
   let selected = $state(todayIso());
   let events = $state<PlannerEvent[]>([]);
+  let tasks = $state<PlannerTask[]>([]);
   let loading = $state(true);
 
   let editorOpen = $state(false);
@@ -73,12 +85,15 @@
   });
 
   const dayEvents = $derived(byDate[selected] ?? []);
+  const dayTasks = $derived(tasksForDay(tasks, selected));
   const today = $derived(todayIso());
 
   async function load(): Promise<void> {
     const from = addDaysIso(cursor, -7);
     const to = addDaysIso(cursor, 45);
-    events = await eventsBetween(from, to);
+    const [rows, taskRows] = await Promise.all([eventsBetween(from, to), allTasks()]);
+    events = rows;
+    tasks = taskRows;
     loading = false;
   }
 
@@ -160,6 +175,16 @@
       toasts.error(e instanceof Error ? e.message : String(e));
     }
   }
+
+  /** Отметка дела за выбранный день: календарь показывает те же дела, что и «Дела». */
+  async function toggleTask(task: PlannerTask): Promise<void> {
+    try {
+      await toggleTaskDone(task.id, selected);
+      tasks = await allTasks();
+    } catch (e) {
+      toasts.error(e instanceof Error ? e.message : String(e));
+    }
+  }
 </script>
 
 <div class="page">
@@ -234,6 +259,36 @@
           </li>
         {/each}
       </ul>
+    {/if}
+
+    {#if dayTasks.length > 0}
+      <div class="day-tasks">
+        <div class="row-between">
+          <h3>Дела</h3>
+          <button class="btn btn-sm btn-ghost" onclick={() => router.go('/tasks')}>Все дела</button>
+        </div>
+        <ul class="tasks">
+          {#each dayTasks as task (task.id)}
+            {@const done = isTaskDone(task, selected)}
+            <li>
+              <button
+                class="task"
+                class:done
+                aria-pressed={done}
+                onclick={() => toggleTask(task)}
+              >
+                <span class="tick" class:on={done}>{done ? '✓' : ''}</span>
+                <span class="body">
+                  <strong>{task.title}</strong>
+                  <span class="mute tiny">
+                    {repeatLabel(task.days, task.onceDate)}{task.time ? ` в ${task.time}` : ''}
+                  </span>
+                </span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </div>
     {/if}
   </section>
 </div>
@@ -423,6 +478,68 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
+  }
+
+  .day-tasks {
+    border-top: 1px solid var(--border-soft);
+    padding-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .day-tasks h3 {
+    margin: 0;
+    font-size: 0.92rem;
+  }
+
+  .tasks {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .task {
+    width: 100%;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    text-align: left;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-s);
+    padding: 6px 8px;
+  }
+
+  .task:hover {
+    border-color: var(--border-soft);
+  }
+
+  .tick {
+    flex: 0 0 20px;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-elev-2);
+    color: #fff;
+    font-size: 0.72rem;
+    line-height: 1;
+    display: grid;
+    place-items: center;
+  }
+
+  .tick.on {
+    background: var(--accent);
+    border-color: transparent;
+  }
+
+  .task.done strong {
+    text-decoration: line-through;
+    color: var(--text-mute);
   }
 
   @media (max-width: 560px) {

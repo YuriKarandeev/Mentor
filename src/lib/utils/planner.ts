@@ -7,7 +7,7 @@
  * молча превращается в 2 марта, поэтому дата сверяется по компонентам.
  */
 
-/** Колонки канбана (пригодятся в срезе 2, здесь — единый словарь). */
+/** Колонки канбана старых проектов: словарь оставлен для будущего среза «проекты». */
 export type ProjectColumn = 'idea' | 'planned' | 'progress' | 'done';
 
 export const PROJECT_COLUMNS: ProjectColumn[] = ['idea', 'planned', 'progress', 'done'];

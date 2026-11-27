@@ -4,6 +4,14 @@ import { notifyLocalChange } from '../sync/signal';
 import { now, uid } from '../utils/ids';
 import { toPlainValue } from '../utils/plain';
 import { AI_MAX_NOTES, AI_MAX_TITLE, text, validDate, validTime } from '../utils/planner';
+import {
+  TASK_MAX_NOTES,
+  TASK_MAX_TITLE,
+  compareTasks,
+  normalizeDoneDates,
+  normalizeDays,
+  withTaskDone
+} from '../utils/tasks';
 
 export type Level = 'новичок' | 'средний' | 'продвинутый';
 export type ItemKind = 'theory' | 'practice' | 'check';
@@ -15,7 +23,7 @@ export type ThemeMode = 'auto' | 'light' | 'dark';
 export type DirtyFlag = 0 | 1;
 
 /** Сущности, которые зеркалятся в Firestore. */
-export type SyncEntity = 'topic' | 'plan' | 'message' | 'note' | 'memory' | 'profile' | 'event';
+export type SyncEntity = 'topic' | 'plan' | 'message' | 'note' | 'memory' | 'profile' | 'event' | 'task';
 
 /** Надгробие: удаление, которое ещё нужно протолкнуть в облако. */
 export interface Tombstone {
@@ -117,6 +125,29 @@ export interface PlannerEvent {
   dirty: DirtyFlag;
 }
 
+/**
+ * Дело — повторяющаяся задача. Расписание задаётся либо днями недели
+ * (`days`, 0 — понедельник), либо одной датой (`onceDate`). Отметки
+ * хранятся массивом дат: дело не «выполнено навсегда», а выполнено
+ * в конкретный день, поэтому `done` — не флаг, а история.
+ */
+export interface PlannerTask {
+  id: string;
+  title: string;
+  notes: string;
+  /** Дни недели: 0 — понедельник … 6 — воскресенье. Пусто у разового дела. */
+  days: number[];
+  /** «ГГГГ-ММ-ДД» для разового дела; пусто при повторе. */
+  onceDate: string;
+  /** «ЧЧ:ММ» или пустая строка. */
+  time: string;
+  /** Даты «ГГГГ-ММ-ДД», когда дело отмечено выполненным. */
+  done: string[];
+  createdAt: number;
+  updatedAt: number;
+  dirty: DirtyFlag;
+}
+
 /** Сжатая память наставника по теме (раньше лежала в kv как memory:<id>). */
 export interface MemoryRow {
   topicId: string;
@@ -158,7 +189,7 @@ export interface KvRow {
 export const DEFAULT_PROFILE: Profile = { goals: [], interests: [], updatedAt: 0 };
 
 /** Версия схемы; растёт вместе с миграциями в StudyDB. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 function backfillV2(row: { createdAt?: number; updatedAt?: number; dirty?: DirtyFlag }, stamp: number): void {
   row.updatedAt = row.updatedAt ?? row.createdAt ?? stamp;
@@ -203,6 +234,7 @@ class StudyDB extends Dexie {
   notes!: Table<Note, string>;
   memory!: Table<MemoryRow, string>;
   events!: Table<PlannerEvent, string>;
+  tasks!: Table<PlannerTask, string>;
   kv!: Table<KvRow, string>;
   tombstones!: Table<Tombstone, string>;
 
@@ -230,6 +262,11 @@ class StudyDB extends Dexie {
     // v3: календарь. Новая таблица создаётся сама, данные v2 не трогаем.
     this.version(3).stores({
       events: 'id, date, updatedAt, dirty'
+    });
+
+    // v4: дела с повтором по дням недели. Тоже только новая таблица.
+    this.version(4).stores({
+      tasks: 'id, updatedAt, dirty'
     });
   }
 }
@@ -292,6 +329,7 @@ export async function countPending(): Promise<number> {
     db.notes.where('dirty').equals(1).count(),
     db.memory.where('dirty').equals(1).count(),
     db.events.where('dirty').equals(1).count(),
+    db.tasks.where('dirty').equals(1).count(),
     db.kv.where('dirty').equals(1).count(),
     db.tombstones.where('dirty').equals(1).count()
   ]);
@@ -611,22 +649,149 @@ export async function allEvents(): Promise<PlannerEvent[]> {
   return rows.sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
 }
 
+/* --------------------------------------------------------------------- дела */
+
+export interface TaskInput {
+  id?: string;
+  title: string;
+  notes?: string;
+  /** Дни недели: 0 — понедельник … 6 — воскресенье. */
+  days?: number[];
+  /** Разовая дата «ГГГГ-ММ-ДД»; при ней дни недели игнорируются. */
+  onceDate?: string;
+  time?: string;
+}
+
+/** Приводит дело к безопасному виду: без расписания дело не имеет смысла. */
+function normalizeTaskFields(
+  input: TaskInput
+): Pick<PlannerTask, 'title' | 'notes' | 'days' | 'onceDate' | 'time'> {
+  const title = text(input.title, TASK_MAX_TITLE);
+  if (!title) throw new Error('У дела должно быть название');
+  const onceDate = validDate(input.onceDate);
+  const days = onceDate ? [] : normalizeDays(input.days);
+  if (!onceDate && days.length === 0) {
+    throw new Error('Выберите хотя бы один день недели или дату');
+  }
+  return {
+    title,
+    notes: text(input.notes, TASK_MAX_NOTES),
+    days,
+    onceDate,
+    time: validTime(input.time)
+  };
+}
+
+export async function addTask(input: TaskInput): Promise<PlannerTask> {
+  const ts = now();
+  const task: PlannerTask = {
+    id: input.id ?? uid('task'),
+    ...normalizeTaskFields(input),
+    done: [],
+    createdAt: ts,
+    updatedAt: ts,
+    dirty: 1
+  };
+  await db.tasks.add(task);
+  notifyLocalChange();
+  return task;
+}
+
+export async function updateTask(
+  id: string,
+  patch: Partial<TaskInput>
+): Promise<PlannerTask | undefined> {
+  const existing = await db.tasks.get(id);
+  if (!existing) return undefined;
+  const merged = normalizeTaskFields({
+    title: patch.title ?? existing.title,
+    notes: patch.notes ?? existing.notes,
+    days: patch.days ?? existing.days,
+    onceDate: patch.onceDate ?? existing.onceDate,
+    time: patch.time ?? existing.time
+  });
+  const row: PlannerTask = {
+    ...existing,
+    ...merged,
+    // Смена расписания не должна стирать историю отметок.
+    done: normalizeDoneDates(existing.done),
+    updatedAt: now(),
+    dirty: 1
+  };
+  await db.tasks.put(row);
+  notifyLocalChange();
+  return row;
+}
+
+/** Удаление дела: локально + надгробие, чтобы не «воскресло» из облака. */
+export async function removeTask(id: string): Promise<void> {
+  const ts = now();
+  await db.transaction('rw', [db.tasks, db.tombstones], async () => {
+    const task = await db.tasks.get(id);
+    await db.tasks.delete(id);
+    if (task) await db.tombstones.put(tombstoneOf('task', id, ts));
+  });
+  notifyLocalChange();
+}
+
+/** Отметка «сделано» за конкретный день. */
+export async function toggleTaskDone(
+  id: string,
+  dateIso: string,
+  done?: boolean
+): Promise<PlannerTask | undefined> {
+  const existing = await db.tasks.get(id);
+  if (!existing) return undefined;
+  const next = withTaskDone(existing, dateIso, done ?? !existing.done.includes(dateIso));
+  const row: PlannerTask = {
+    ...next,
+    done: normalizeDoneDates(next.done),
+    updatedAt: now(),
+    dirty: 1
+  };
+  await db.tasks.put(row);
+  notifyLocalChange();
+  return row;
+}
+
+export async function allTasks(): Promise<PlannerTask[]> {
+  const rows = await db.tasks.toArray();
+  return rows.sort(compareTasks);
+}
+
 /**
  * Пачка изменений от ИИ или импорта: записать/удалить события одной транзакцией.
  * `restore` снимает надгробия — это нужно кнопке «Отменить» после удаления.
  */
-export async function applyEventChanges(changes: {
+export interface EventChanges {
   put: PlannerEvent[];
   remove: string[];
+  /** id, у которых нужно снять надгробие (отмена удаления). */
   restore?: string[];
+}
+
+export interface TaskChanges {
+  put: PlannerTask[];
+  remove: string[];
+  restore?: string[];
+}
+
+/**
+ * Пачка изменений от ИИ, импорта или кнопки «Отменить»: события и дела
+ * пишутся одной транзакцией. `restore` снимает надгробия, а все строки
+ * помечаются `dirty` — иначе облако вернёт отменённую правку обратно.
+ */
+export async function applyPlannerChanges(changes: {
+  events?: EventChanges;
+  tasks?: TaskChanges;
 }): Promise<void> {
   const ts = now();
-  await db.transaction('rw', [db.events, db.tombstones], async () => {
-    if (changes.put.length > 0) {
-      // Строки могут прийти из отмены: у них старый updatedAt и dirty = 0.
-      // Помечаем к отправке, иначе облако вернёт отменённую правку обратно.
+  const events = changes.events;
+  const tasks = changes.tasks;
+  await db.transaction('rw', [db.events, db.tasks, db.tombstones], async () => {
+    if (events && events.put.length > 0) {
       await db.events.bulkPut(
-        changes.put.map((row) =>
+        events.put.map((row) =>
           toPlainValue({
             ...row,
             updatedAt: Math.max(row.updatedAt, ts),
@@ -635,12 +800,33 @@ export async function applyEventChanges(changes: {
         )
       );
     }
-    if (changes.remove.length > 0) {
-      await db.events.bulkDelete(changes.remove);
-      await db.tombstones.bulkPut(changes.remove.map((id) => tombstoneOf('event', id, ts)));
+    if (events && events.remove.length > 0) {
+      await db.events.bulkDelete(events.remove);
+      await db.tombstones.bulkPut(events.remove.map((id) => tombstoneOf('event', id, ts)));
     }
-    if (changes.restore && changes.restore.length > 0) {
-      await db.tombstones.bulkDelete(changes.restore.map((id) => `event:${id}`));
+    if (events?.restore && events.restore.length > 0) {
+      await db.tombstones.bulkDelete(events.restore.map((id) => `event:${id}`));
+    }
+    if (tasks && tasks.put.length > 0) {
+      await db.tasks.bulkPut(
+        tasks.put.map((row) =>
+          toPlainValue({
+            ...row,
+            // Массивы приходят из ответа модели и из отмены — чистим оба.
+            days: normalizeDays(row.days),
+            done: normalizeDoneDates(row.done),
+            updatedAt: Math.max(row.updatedAt, ts),
+            dirty: 1
+          })
+        )
+      );
+    }
+    if (tasks && tasks.remove.length > 0) {
+      await db.tasks.bulkDelete(tasks.remove);
+      await db.tombstones.bulkPut(tasks.remove.map((id) => tombstoneOf('task', id, ts)));
+    }
+    if (tasks?.restore && tasks.restore.length > 0) {
+      await db.tombstones.bulkDelete(tasks.restore.map((id) => `task:${id}`));
     }
   });
   notifyLocalChange();
@@ -654,7 +840,7 @@ export async function wipeAll(): Promise<void> {
   const ts = now();
   await db.transaction(
     'rw',
-    [db.topics, db.plans, db.messages, db.notes, db.memory, db.events, db.kv, db.tombstones],
+    [db.topics, db.plans, db.messages, db.notes, db.memory, db.events, db.tasks, db.kv, db.tombstones],
     async () => {
       const topicIds = (await db.topics.toCollection().primaryKeys()) as string[];
       const planIds = (await db.plans.toCollection().primaryKeys()) as string[];
@@ -662,6 +848,7 @@ export async function wipeAll(): Promise<void> {
       const noteIds = (await db.notes.toCollection().primaryKeys()) as string[];
       const memoryIds = (await db.memory.toCollection().primaryKeys()) as string[];
       const eventIds = (await db.events.toCollection().primaryKeys()) as string[];
+      const taskIds = (await db.tasks.toCollection().primaryKeys()) as string[];
       const hasProfile = Boolean(await db.kv.get('profile'));
 
       const rows: Tombstone[] = [
@@ -670,7 +857,8 @@ export async function wipeAll(): Promise<void> {
         ...messageIds.map((id) => tombstoneOf('message', id, ts)),
         ...noteIds.map((id) => tombstoneOf('note', id, ts)),
         ...memoryIds.map((id) => tombstoneOf('memory', id, ts)),
-        ...eventIds.map((id) => tombstoneOf('event', id, ts))
+        ...eventIds.map((id) => tombstoneOf('event', id, ts)),
+        ...taskIds.map((id) => tombstoneOf('task', id, ts))
       ];
       if (hasProfile) rows.push(tombstoneOf('profile', 'main', ts));
       if (rows.length > 0) await db.tombstones.bulkPut(rows);
@@ -681,6 +869,7 @@ export async function wipeAll(): Promise<void> {
       await db.notes.clear();
       await db.memory.clear();
       await db.events.clear();
+      await db.tasks.clear();
 
       // Служебные ключи синхронизации (курсоры, авто-режим) сохраняем:
       // иначе следующий pull с нуля вернёт удалённое из облака.

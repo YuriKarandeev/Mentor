@@ -101,7 +101,7 @@ check(groups[1].items[0].id === 'c', 'следующий день на своё�
 
 /* ---------- разбор действий ---------- */
 
-const { applyPlannerActions, describeEventActions, normalizeEventAction } = actions;
+const { applyPlannerActions, describePlannerActions, normalizeEventAction } = actions;
 
 const createdAction = normalizeEventAction({
   type: 'event.create',
@@ -144,27 +144,30 @@ const result = applyPlannerActions(
   { now: 1000, newId: () => `new_${++seq}` }
 );
 
-check(result.changes.put.length === 2, 'create и update попадают в put');
-check(result.changes.remove.length === 1 && result.changes.remove[0] === 'e2', 'delete попадает в remove');
+check(result.changes.events.put.length === 2, 'create и update попадают в put');
+check(
+  result.changes.events.remove.length === 1 && result.changes.events.remove[0] === 'e2',
+  'delete попадает в remove'
+);
 check(result.applied.length === 3, 'применено три действия');
 check(result.skipped.length === 2, 'два действия пропущены с причинами');
 
-const madeRow = result.changes.put.find((row) => row.id === 'new_1');
+const madeRow = result.changes.events.put.find((row) => row.id === 'new_1');
 check(
   Boolean(madeRow && madeRow.date === '2026-11-29' && madeRow.time === '18:30' && madeRow.dirty === 1),
   'новое событие получает id, время и dirty'
 );
 check(Boolean(madeRow && madeRow.createdAt === 1000 && madeRow.updatedAt === 1000), 'метки времени берутся из now');
 
-const editedRow = result.changes.put.find((row) => row.id === 'e1');
+const editedRow = result.changes.events.put.find((row) => row.id === 'e1');
 check(Boolean(editedRow && editedRow.time === '11:00' && editedRow.title === 'Старое'), 'правка меняет только переданное поле');
 check(Boolean(editedRow && editedRow.updatedAt === 1000 && editedRow.createdAt === 1), 'у правки обновляется только updatedAt');
 
-check(result.undo.remove.length === 1 && result.undo.remove[0] === 'new_1', 'отмена удаляет созданные события');
-check(result.undo.put.some((row) => row.id === 'e1' && row.time === '10:00'), 'отмена возвращает прежнюю версию правки');
-check(result.undo.put.some((row) => row.id === 'e2'), 'отмена возвращает удалённое событие');
+check(result.undo.events.remove.length === 1 && result.undo.events.remove[0] === 'new_1', 'отмена удаляет созданные события');
+check(result.undo.events.put.some((row) => row.id === 'e1' && row.time === '10:00'), 'отмена возвращает прежнюю версию правки');
+check(result.undo.events.put.some((row) => row.id === 'e2'), 'отмена возвращает удалённое событие');
 check(
-  Array.isArray(result.undo.restore) && result.undo.restore.includes('e2'),
+  Array.isArray(result.undo.events.restore) && result.undo.events.restore.includes('e2'),
   'отмена снимает надгробие удалённого события'
 );
 check(base[0].time === '10:00' && base.length === 2, 'исходный массив не меняется');
@@ -181,7 +184,7 @@ check(
   'лишние действия объяснены'
 );
 
-const labels = describeEventActions(
+const labels = describePlannerActions(
   [
     { type: 'event.create', title: 'Созвон', date: '2026-11-27', time: '10:00' },
     { type: 'event.delete', id: 'e1' },

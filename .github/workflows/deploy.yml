@@ -59,6 +59,9 @@ jobs:
       - name: Planner tests
         run: npm run test:planner
 
+      - name: Task tests
+        run: npm run test:tasks
+
       - name: Generate PWA icons
         run: npm run icons
 
