@@ -62,6 +62,9 @@ jobs:
       - name: Task tests
         run: npm run test:tasks
 
+      - name: Budget tests
+        run: npm run test:budget
+
       - name: Reminder schedule tests
         run: npm run test:reminders
 

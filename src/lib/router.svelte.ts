@@ -9,13 +9,27 @@ export type Route =
   | { name: 'topic'; id: string; tab: TopicTab }
   | { name: 'calendar' }
   | { name: 'tasks' }
+  | { name: 'budget'; tab: BudgetTab }
   | { name: 'assistant' }
   | { name: 'library' }
+  | { name: 'more' }
   | { name: 'settings' };
 
 export type TopicTab = 'plan' | 'chat' | 'notes';
 
 const TABS: TopicTab[] = ['plan', 'chat', 'notes'];
+
+/** Разделы бюджета. Порядок — это порядок кнопок в шапке раздела. */
+export type BudgetTab = 'overview' | 'journal' | 'plan' | 'obligations' | 'assets' | 'analytics';
+
+export const BUDGET_TABS: BudgetTab[] = [
+  'overview',
+  'journal',
+  'plan',
+  'obligations',
+  'assets',
+  'analytics'
+];
 
 function parse(hash: string): Route {
   const clean = hash.replace(/^#\/?/, '');
@@ -25,8 +39,13 @@ function parse(hash: string): Route {
   if (head === 'new') return { name: 'new-topic' };
   if (head === 'calendar') return { name: 'calendar' };
   if (head === 'tasks') return { name: 'tasks' };
+  if (head === 'budget') {
+    const tab = (parts[1] ?? 'overview') as BudgetTab;
+    return { name: 'budget', tab: BUDGET_TABS.includes(tab) ? tab : 'overview' };
+  }
   if (head === 'assistant') return { name: 'assistant' };
   if (head === 'library') return { name: 'library' };
+  if (head === 'more') return { name: 'more' };
   if (head === 'settings') return { name: 'settings' };
   if (head === 'topic' && parts[1]) {
     const tab = (parts[2] ?? 'plan') as TopicTab;

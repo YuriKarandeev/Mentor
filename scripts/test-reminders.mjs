@@ -54,6 +54,7 @@ const base = {
   enabled: true,
   events: true,
   tasks: true,
+  bills: true,
   leadMinutes: 15,
   digestTime: '09:00',
   quietFrom: '',
@@ -65,6 +66,7 @@ const build = (overrides = {}) =>
   buildReminders({
     events: overrides.events ?? [],
     tasks: overrides.tasks ?? [],
+    obligations: overrides.obligations ?? [],
     settings: { ...base, ...(overrides.settings ?? {}) },
     now: NOW
   });
@@ -270,6 +272,47 @@ console.log('\nвыключено');
   check(items.length === 0, 'enabled=false — пустой список');
 }
 
+// --- 13a. платежи бюджета ---
+console.log('\nплатежи');
+{
+  const bill = {
+    id: 'ob1',
+    title: 'Аренда',
+    amount: 1240000,
+    frequency: 'monthly',
+    dueDay: 28
+  };
+  const items = build({ obligations: [bill] });
+  const dueTag = `bill:ob1:${TOMORROW}`;
+  const due = items.find((item) => item.tag === dueTag);
+  check(Boolean(due), 'платёж напомнит в день оплаты', JSON.stringify(tags(items)));
+  check(due?.at === at(TOMORROW, 9, 0), 'в день оплаты — в 09:00', String(due?.at));
+  check(due?.kind === 'bill' && due?.url === '#/budget/obligations', 'переход в «Платежи»');
+  check(due?.body.includes('12 400 ₽'), 'в теле — сумма платежа', due?.body ?? '');
+
+  const eve = items.find((item) => item.tag === `${dueTag}:eve`);
+  check(Boolean(eve), 'и за день до оплаты');
+  check(eve?.at === at(TODAY, 9, 0), 'предупреждение — вчера в 09:00', String(eve?.at));
+
+  check(build({ obligations: [bill], settings: { bills: false } }).length === 0, 'раздел «платежи» выключен');
+  check(build({ obligations: [{ ...bill, remind: false }] }).length === 0, 'напоминание по платежу выключено');
+  check(build({ obligations: [{ ...bill, active: false }] }).length === 0, 'неактивный платёж молчит');
+  check(build({ obligations: [{ ...bill, amount: 0 }] }).length === 0, 'платёж без суммы не напоминает');
+
+  const once = build({
+    obligations: [
+      { id: 'ob2', title: 'Страховка', amount: 500000, frequency: 'once', dueDate: TOMORROW }
+    ]
+  });
+  check(tags(once).includes(`bill:ob2:${TOMORROW}`), 'разовый платёж напоминает в свою дату');
+
+  const todayBill = build({ obligations: [{ ...bill, dueDay: 27 }] });
+  check(
+    tags(todayBill).includes(`bill:ob1:${TODAY}`) && !tags(todayBill).includes(`bill:ob1:${TODAY}:eve`),
+    'платёж на сегодня: напоминание есть, вчерашнее уже прошло'
+  );
+}
+
 // --- 14. подписи ---
 console.log('\nподписи');
 {
@@ -279,8 +322,15 @@ console.log('\nподписи');
   check(leadLabel(90) === 'через 1 ч 30 мин', 'полтора часа', leadLabel(90));
   const label = reminderLabel({ at: at(TODAY, 14, 0), title: 'Созвон' }, NOW);
   check(label === 'Сегодня 14:00 · Созвон', 'подпись ближайшего напоминания', label);
-  check(remindersSummary(base) === 'события и дела · за 15 мин', 'сводка настроек', remindersSummary(base));
-  check(remindersSummary({ ...base, events: false, tasks: false }) === 'выключены', 'без разделов — выключены');
+  check(
+    remindersSummary(base) === 'события, дела и платежи · за 15 мин',
+    'сводка настроек',
+    remindersSummary(base)
+  );
+  check(
+    remindersSummary({ ...base, events: false, tasks: false, bills: false }) === 'выключены',
+    'без разделов — выключены'
+  );
 }
 
 // --- 15. план для Firestore ---

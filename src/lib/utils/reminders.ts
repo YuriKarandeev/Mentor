@@ -11,6 +11,8 @@
  */
 import { addDaysIso, localDate, pad2, text, validDate, validTime } from './planner.ts';
 import { isTaskDone, taskOccursOn } from './tasks.ts';
+import { obligationDate } from './budget.ts';
+import { formatMoney } from './money.ts';
 
 /** Настройки напоминаний. Хранятся в kv устройства, в облако не уходят. */
 export interface ReminderSettings {
@@ -20,6 +22,8 @@ export interface ReminderSettings {
   events: boolean;
   /** Напоминать о делах. */
   tasks: boolean;
+  /** Напоминать о платежах бюджета: за день и в день оплаты. */
+  bills: boolean;
   /** За сколько минут до события. 0 — в момент начала. */
   leadMinutes: number;
   /** «ЧЧ:ММ» сводки на день; пустая строка — сводку не отправлять. */
@@ -43,6 +47,7 @@ export const DEFAULT_REMINDERS: ReminderSettings = {
   enabled: false,
   events: true,
   tasks: true,
+  bills: true,
   leadMinutes: 15,
   digestTime: '09:00',
   quietFrom: '22:00',
@@ -64,7 +69,23 @@ export const PLAN_VERSION = 1;
 const MIN_LEAD_MS = 20_000;
 const MAX_BODY = 240;
 
-export type ReminderKind = 'event' | 'task' | 'digest';
+export type ReminderKind = 'event' | 'task' | 'digest' | 'bill';
+
+/** Платёж бюджета в объёме, который нужен напоминаниям. */
+export interface ReminderObligationLike {
+  id: string;
+  title: string;
+  amount: number;
+  frequency?: 'monthly' | 'yearly' | 'once';
+  dueDay?: number;
+  dueDate?: string;
+  active?: boolean;
+  /** Выключенные напоминания по конкретному платежу. */
+  remind?: boolean;
+}
+
+/** Время уведомления о платеже: 09:00 по локальному времени устройства. */
+export const BILL_REMINDER_TIME = '09:00';
 
 export interface ReminderDraft {
   /** Момент отправки, UTC-миллисекунды. */
@@ -118,6 +139,8 @@ export interface ReminderTaskLike {
 export interface ReminderInput {
   events: ReminderEventLike[];
   tasks: ReminderTaskLike[];
+  /** Платежи бюджета; отсутствуют — напоминаний о платежах не будет. */
+  obligations?: ReminderObligationLike[];
   settings: ReminderSettings | Partial<ReminderSettings> | null | undefined;
   /** Текущий момент; по умолчанию — системное время. */
   now?: Date | number;
@@ -212,6 +235,36 @@ export function buildReminders(input: ReminderInput): ReminderDraft[] {
     }
   }
 
+  const billMinutes = timeToMinutes(BILL_REMINDER_TIME);
+  if (settings.bills && billMinutes >= 0) {
+    for (const obligation of input.obligations ?? []) {
+      if (obligation.active === false || obligation.remind === false) continue;
+      const title = text(obligation.title, 120);
+      const amount = Number(obligation.amount) || 0;
+      if (!title || amount <= 0) continue;
+      for (const date of days) {
+        // Платёж «в этом месяце» — это конкретная дата, а не только день месяца:
+        // 31-е в феврале сдвигается, разовый платёж бывает всего один раз.
+        if (obligationDate(obligation, date.slice(0, 7)) !== date) continue;
+        const money = formatMoney(amount);
+        push(atLocalDay(date, billMinutes), {
+          title: `Платёж: ${title}`,
+          body: `${money} · к оплате сегодня`,
+          tag: `bill:${obligation.id}:${date}`,
+          kind: 'bill',
+          url: '#/budget/obligations'
+        });
+        push(atLocalDay(addDaysIso(date, -1), billMinutes), {
+          title: `Завтра платёж: ${title}`,
+          body: `${money} · проверьте, хватает ли денег`,
+          tag: `bill:${obligation.id}:${date}:eve`,
+          kind: 'bill',
+          url: '#/budget/obligations'
+        });
+      }
+    }
+  }
+
   const digestMinutes = timeToMinutes(settings.digestTime);
   if (digestMinutes >= 0) {
     for (const date of days) {
@@ -287,12 +340,20 @@ export function reminderLabel(
 /** Подпись настроек — для карточки в «Настройках». */
 export function remindersSummary(settings: ReminderSettings | null | undefined): string {
   const s = normalizeReminderSettings(settings);
-  if (!s.events && !s.tasks) return 'выключены';
+  if (!s.events && !s.tasks && !s.bills) return 'выключены';
   const parts: string[] = [];
   if (s.events) parts.push('события');
   if (s.tasks) parts.push('дела');
+  if (s.bills) parts.push('платежи');
   const lead = s.leadMinutes > 0 ? `за ${s.leadMinutes} мин` : 'в момент начала';
-  return `${parts.join(' и ')} · ${lead}`;
+  return `${joinRu(parts)} · ${lead}`;
+}
+
+/** «события, дела и платежи» — без повторяющегося «и» между всеми пунктами. */
+function joinRu(parts: string[]): string {
+  if (parts.length === 0) return '';
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(', ')} и ${parts[parts.length - 1]}`;
 }
 
 /** Минуты от полуночи для «ЧЧ:ММ»; -1 — пусто или неверно. */
@@ -354,6 +415,7 @@ export function normalizeReminderSettings(
     enabled: src.enabled === true,
     events: src.events !== false,
     tasks: src.tasks !== false,
+    bills: src.bills !== false,
     leadMinutes: Number.isFinite(lead)
       ? Math.min(Math.max(Math.round(lead), 0), 720)
       : DEFAULT_REMINDERS.leadMinutes,

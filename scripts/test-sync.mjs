@@ -142,12 +142,30 @@ check(chunks.length === 3 && chunks[2].length === 100, 'чанкование р�
 check(model.chunk([], 10).length === 0, 'пустой список не даёт батчей');
 
 check(
-  model.SYNCED_COLLECTIONS.length === 7 &&
-    ['topics', 'plans', 'messages', 'notes', 'memory', 'events', 'tasks'].every((name) =>
-      model.SYNCED_COLLECTIONS.includes(name)
-    ) &&
+  model.SYNCED_COLLECTIONS.length === 14 &&
+    [
+      'topics',
+      'plans',
+      'messages',
+      'notes',
+      'memory',
+      'events',
+      'tasks',
+      'accounts',
+      'categories',
+      'transactions',
+      'budgets',
+      'obligations',
+      'assets',
+      'snapshots'
+    ].every((name) => model.SYNCED_COLLECTIONS.includes(name)) &&
     !model.SYNCED_COLLECTIONS.includes('kv'),
-  'в облако синхронизируются только данные (события и дела), но не таблица настроек kv'
+  'в облако уходят данные и бюджет, но не таблица настроек kv'
+);
+
+check(
+  new Set(model.SYNCED_COLLECTIONS).size === model.SYNCED_COLLECTIONS.length,
+  'коллекции синхронизации не повторяются'
 );
 
 /* --- события календаря --- */
@@ -341,6 +359,124 @@ check(plainValue.toPlainValue({ at: new Date(1700000000000) }).at instanceof Dat
 check(
   Array.isArray(plainValue.toPlainValue(deepProxy(['x', 'y']))),
   'массив на верхнем уровне не превращается в объект'
+);
+
+/* --- бюджет --- */
+
+const accountRow = {
+  id: 'acc_1',
+  title: 'Карта',
+  kind: 'card',
+  openingBalance: 150000,
+  includeInFree: true,
+  archived: false,
+  order: 10,
+  notes: '',
+  createdAt: 1000,
+  updatedAt: 2000,
+  dirty: 1
+};
+const remoteAccount = model.toRemoteAccount(accountRow);
+check(
+  !('dirty' in remoteAccount) && remoteAccount.openingBalance === 150000,
+  'счёт уходит в облако без dirty и с копейками'
+);
+const restoredAccount = model.fromRemoteAccount('acc_1', { ...remoteAccount, srvUpdatedAt: {} });
+check(
+  restoredAccount.openingBalance === 150000 && restoredAccount.dirty === 0,
+  'сумма счёта не пересчитывается при возврате из облака'
+);
+
+const txRow = {
+  id: 'tx_1',
+  date: '2026-11-28',
+  type: 'expense',
+  amount: 12345,
+  accountId: 'acc_1',
+  toAccountId: '',
+  categoryId: 'cat:food',
+  payee: 'Пятёрочка',
+  notes: '',
+  obligationId: '',
+  createdAt: 1000,
+  updatedAt: 2000,
+  dirty: 1
+};
+const restoredTx = model.fromRemoteTransaction('tx_1', {
+  ...model.toRemoteTransaction(txRow),
+  srvUpdatedAt: {}
+});
+check(
+  restoredTx.amount === 12345 && restoredTx.categoryId === 'cat:food' && restoredTx.date === '2026-11-28',
+  'операция переживает дорогу в облако и обратно'
+);
+const brokenTx = model.fromRemoteTransaction('tx_2', { date: '2026-02-30', amount: 500, accountId: 'a' });
+check(brokenTx.date === '', 'операцию с несуществующей датой движок не сохранит');
+
+const restoredBudget = model.fromRemoteBudget('2026-11', {
+  expectedIncome: 300000,
+  savingsTarget: 20000,
+  lines: [
+    { categoryId: 'cat:food', limit: 40000 },
+    { categoryId: 'cat:food', limit: 50000 }
+  ],
+  srvUpdatedAt: {}
+});
+check(
+  restoredBudget.id === '2026-11' && restoredBudget.lines.length === 1 && restoredBudget.lines[0].limit === 40000,
+  'план месяца чистится от повторяющихся строк'
+);
+check(model.budgetMonthOf('2026-11') === '2026-11' && model.budgetMonthOf('мусор') === '', 'месяц из id документа');
+
+const obligationRow = {
+  id: 'obl_1',
+  title: 'Аренда',
+  kind: 'bill',
+  amount: 3500000,
+  frequency: 'monthly',
+  dueDay: 31,
+  dueDate: '',
+  active: true,
+  remind: true,
+  categoryId: 'cat:home',
+  accountId: 'acc_1',
+  assetId: '',
+  notes: '',
+  createdAt: 1000,
+  updatedAt: 2000,
+  dirty: 1
+};
+const restoredObligation = model.fromRemoteObligation('obl_1', {
+  ...model.toRemoteObligation(obligationRow),
+  srvUpdatedAt: {}
+});
+check(
+  restoredObligation.amount === 3500000 && restoredObligation.dueDay === 31,
+  'обязательство сохраняет сумму и день платежа'
+);
+
+const snapshotRow = {
+  id: '2026-11-28',
+  date: '2026-11-28',
+  assetsTotal: 900000,
+  liabilitiesTotal: 300000,
+  netWorth: 600000,
+  notes: '',
+  createdAt: 1000,
+  updatedAt: 2000,
+  dirty: 1
+};
+const restoredSnapshot = model.fromRemoteSnapshot('2026-11-28', {
+  ...model.toRemoteSnapshot(snapshotRow),
+  srvUpdatedAt: {}
+});
+check(restoredSnapshot.netWorth === 600000, 'снимок капитала переносит нетто-капитал');
+
+check(
+  model.collectionForTombstone('account') === 'accounts' &&
+    model.collectionForTombstone('transaction') === 'transactions' &&
+    model.collectionForTombstone('snapshot') === 'snapshots',
+  'надгробия бюджета указывают на свои коллекции'
 );
 
 if (failures.length > 0) {

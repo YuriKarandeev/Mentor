@@ -20,7 +20,7 @@
  * Сеть и браузерные API здесь изолированы — сама логика расписания лежит
  * в `utils/reminders.ts` и проверяется отдельным тестом.
  */
-import { allEvents, allTasks, getKv, setKv } from '../db/db';
+import { allEvents, allObligations, allTasks, getKv, setKv } from '../db/db';
 import { settings } from '../stores/settings.svelte';
 import { loadFirebase, syncConfigured, type FirestoreModule } from '../sync/firebase';
 import { onLocalChange } from '../sync/signal';
@@ -291,8 +291,8 @@ async function savePlan(
 /** Ближайшие напоминания по локальным данным — без обращения к сети. */
 export async function plannedReminders(now: Date = new Date()): Promise<ReminderDraft[]> {
   const reminders: ReminderSettings = normalizeReminderSettings(settings.data.reminders);
-  const [events, tasks] = await Promise.all([allEvents(), allTasks()]);
-  return buildReminders({ events, tasks, settings: reminders, now });
+  const [events, tasks, obligations] = await Promise.all([allEvents(), allTasks(), allObligations()]);
+  return buildReminders({ events, tasks, obligations, settings: reminders, now });
 }
 
 /**

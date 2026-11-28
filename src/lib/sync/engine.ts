@@ -15,6 +15,8 @@ import {
   tombstoneOf,
   type DirtyFlag,
   type MemoryRow,
+  type MoneyAccount,
+  type MonthBudget,
   type Note,
   type Plan,
   type Profile,
@@ -38,22 +40,37 @@ import {
   chunk,
   collectionForTombstone,
   docIdForTombstone,
+  fromRemoteAccount,
+  fromRemoteAsset,
+  fromRemoteBudget,
+  fromRemoteCategory,
   fromRemoteEvent,
+  fromRemoteObligation,
+  fromRemoteSnapshot,
   fromRemoteTask,
+  fromRemoteTransaction,
   pickUpdatedAt,
   shouldApply,
+  toRemoteAccount,
+  toRemoteAsset,
+  toRemoteBudget,
+  toRemoteCategory,
   toRemoteEvent,
   toRemoteMemory,
   toRemoteMessage,
   toRemoteNote,
+  toRemoteObligation,
   toRemotePlan,
   toRemoteProfile,
+  toRemoteSnapshot,
   toRemoteTask,
   toRemoteTopic,
+  toRemoteTransaction,
   toPlain,
   withoutServerFields,
   type SyncedCollection
 } from './model';
+import { validMonth } from '../utils/budget';
 import { onLocalChange } from './signal';
 import { sync } from './state.svelte';
 
@@ -445,6 +462,63 @@ async function applyRemote(
       await db.tasks.put(row);
       return true;
     }
+    case 'accounts': {
+      const row = fromRemoteAccount(id, data);
+      const local = await db.accounts.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.accounts.put(row);
+      return true;
+    }
+    case 'categories': {
+      const row = fromRemoteCategory(id, data);
+      if (!row.title) return false;
+      const local = await db.categories.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.categories.put(row);
+      return true;
+    }
+    case 'transactions': {
+      const row = fromRemoteTransaction(id, data);
+      // Без даты, суммы и счёта операция не участвует ни в остатке, ни в потоке.
+      if (!row.date || !row.amount || !row.accountId) return false;
+      const local = await db.transactions.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.transactions.put(row);
+      return true;
+    }
+    case 'budgets': {
+      // id документа — месяц; посторонние документы в коллекции игнорируем.
+      if (!validMonth(id)) return false;
+      const row = fromRemoteBudget(id, data);
+      const local = await db.budgets.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.budgets.put(row);
+      return true;
+    }
+    case 'obligations': {
+      const row = fromRemoteObligation(id, data);
+      if (!row.title) return false;
+      const local = await db.obligations.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.obligations.put(row);
+      return true;
+    }
+    case 'assets': {
+      const row = fromRemoteAsset(id, data);
+      if (!row.title) return false;
+      const local = await db.assets.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.assets.put(row);
+      return true;
+    }
+    case 'snapshots': {
+      const row = fromRemoteSnapshot(id, data);
+      if (!row.date) return false;
+      const local = await db.snapshots.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.snapshots.put(row);
+      return true;
+    }
   }
 }
 
@@ -526,6 +600,29 @@ async function pullTombstones(current: Ctx): Promise<number> {
   return applied;
 }
 
+/**
+ * Удаление локальной строки по надгробию. Для бюджетных сущностей правило
+ * одно: удаляем, только если локальная копия не новее самого надгробия.
+ */
+async function deleteBudgetRow(
+  table:
+    | 'accounts'
+    | 'categories'
+    | 'transactions'
+    | 'budgets'
+    | 'obligations'
+    | 'assets'
+    | 'snapshots',
+  refId: string,
+  deletedAt: number
+): Promise<boolean> {
+  const rows = db.table<{ id: string; updatedAt: number }, string>(table);
+  const local = await rows.get(refId);
+  if (!local || deletedAt < local.updatedAt) return false;
+  await rows.delete(refId);
+  return true;
+}
+
 async function applyTombstone(type: SyncEntity, refId: string, deletedAt: number): Promise<boolean> {
   switch (type) {
     case 'topic': {
@@ -570,6 +667,20 @@ async function applyTombstone(type: SyncEntity, refId: string, deletedAt: number
       await db.tasks.delete(refId);
       return true;
     }
+    case 'account':
+      return deleteBudgetRow('accounts', refId, deletedAt);
+    case 'category':
+      return deleteBudgetRow('categories', refId, deletedAt);
+    case 'transaction':
+      return deleteBudgetRow('transactions', refId, deletedAt);
+    case 'budget':
+      return deleteBudgetRow('budgets', refId, deletedAt);
+    case 'obligation':
+      return deleteBudgetRow('obligations', refId, deletedAt);
+    case 'asset':
+      return deleteBudgetRow('assets', refId, deletedAt);
+    case 'snapshot':
+      return deleteBudgetRow('snapshots', refId, deletedAt);
     case 'profile': {
       const row = await db.kv.get(PROFILE_KEY);
       const local = row?.value as Profile | undefined;
@@ -645,6 +756,50 @@ async function collectDirty(name: SyncedCollection): Promise<PushRow[]> {
     case 'tasks': {
       const rows = await db.tasks.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
       return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteTask(row) }));
+    }
+    case 'accounts': {
+      const rows = await db.accounts.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteAccount(row) }));
+    }
+    case 'categories': {
+      const rows = await db.categories.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({
+        id: row.id,
+        updatedAt: row.updatedAt,
+        payload: toRemoteCategory(row)
+      }));
+    }
+    case 'transactions': {
+      const rows = await db.transactions.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({
+        id: row.id,
+        updatedAt: row.updatedAt,
+        payload: toRemoteTransaction(row)
+      }));
+    }
+    case 'budgets': {
+      const rows = await db.budgets.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteBudget(row) }));
+    }
+    case 'obligations': {
+      const rows = await db.obligations.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({
+        id: row.id,
+        updatedAt: row.updatedAt,
+        payload: toRemoteObligation(row)
+      }));
+    }
+    case 'assets': {
+      const rows = await db.assets.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteAsset(row) }));
+    }
+    case 'snapshots': {
+      const rows = await db.snapshots.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({
+        id: row.id,
+        updatedAt: row.updatedAt,
+        payload: toRemoteSnapshot(row)
+      }));
     }
   }
 }

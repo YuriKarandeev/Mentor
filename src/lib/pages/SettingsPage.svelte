@@ -426,7 +426,7 @@
 
   async function exportData(): Promise<void> {
     const payload = {
-      version: 4,
+      version: 5,
       exportedAt: new Date().toISOString(),
       topics: await db.topics.toArray(),
       plans: await db.plans.toArray(),
@@ -435,6 +435,13 @@
       memory: await db.memory.toArray(),
       events: await db.events.toArray(),
       tasks: await db.tasks.toArray(),
+      accounts: await db.accounts.toArray(),
+      categories: await db.categories.toArray(),
+      transactions: await db.transactions.toArray(),
+      budgets: await db.budgets.toArray(),
+      obligations: await db.obligations.toArray(),
+      assets: await db.assets.toArray(),
+      snapshots: await db.snapshots.toArray(),
       kv: await db.kv.toArray()
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -466,7 +473,23 @@
       const json = JSON.parse(await file.text()) as Record<string, unknown[]>;
       await db.transaction(
         'rw',
-        [db.topics, db.plans, db.messages, db.notes, db.memory, db.events, db.tasks, db.kv],
+        [
+          db.topics,
+          db.plans,
+          db.messages,
+          db.notes,
+          db.memory,
+          db.events,
+          db.tasks,
+          db.accounts,
+          db.categories,
+          db.transactions,
+          db.budgets,
+          db.obligations,
+          db.assets,
+          db.snapshots,
+          db.kv
+        ],
         async () => {
           if (Array.isArray(json.topics)) await db.topics.bulkPut(normalizeRows(json.topics));
           if (Array.isArray(json.plans)) await db.plans.bulkPut(normalizeRows(json.plans));
@@ -475,6 +498,21 @@
           if (Array.isArray(json.memory)) await db.memory.bulkPut(json.memory as never[]);
           if (Array.isArray(json.events)) await db.events.bulkPut(normalizeRows(json.events));
           if (Array.isArray(json.tasks)) await db.tasks.bulkPut(normalizeRows(json.tasks));
+          if (Array.isArray(json.accounts)) await db.accounts.bulkPut(normalizeRows(json.accounts));
+          if (Array.isArray(json.categories)) {
+            await db.categories.bulkPut(normalizeRows(json.categories));
+          }
+          if (Array.isArray(json.transactions)) {
+            await db.transactions.bulkPut(normalizeRows(json.transactions));
+          }
+          if (Array.isArray(json.budgets)) await db.budgets.bulkPut(normalizeRows(json.budgets));
+          if (Array.isArray(json.obligations)) {
+            await db.obligations.bulkPut(normalizeRows(json.obligations));
+          }
+          if (Array.isArray(json.assets)) await db.assets.bulkPut(normalizeRows(json.assets));
+          if (Array.isArray(json.snapshots)) {
+            await db.snapshots.bulkPut(normalizeRows(json.snapshots));
+          }
           if (Array.isArray(json.kv)) {
             const rows = (json.kv as Array<Record<string, unknown>>).map((row) =>
               row.key === 'profile' ? { ...row, dirty: 1 } : row
@@ -812,7 +850,7 @@
           disabled={reminderBusy || !reminderStatus.ready}
           onchange={toggleReminders}
         />
-        <span>Напоминать о событиях и делах</span>
+        <span>Напоминать о событиях, делах и платежах</span>
       </label>
 
       {#if reminderStatus.permission === 'denied'}
@@ -846,6 +884,15 @@
               onchange={(e) => void patchReminders({ tasks: e.currentTarget.checked })}
             />
             <span>Дела</span>
+          </label>
+          <label class="switch">
+            <input
+              type="checkbox"
+              checked={form.reminders.bills}
+              disabled={reminderBusy}
+              onchange={(e) => void patchReminders({ bills: e.currentTarget.checked })}
+            />
+            <span>Платежи (09:00, за день и в день оплаты)</span>
           </label>
         </div>
 

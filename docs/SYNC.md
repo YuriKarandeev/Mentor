@@ -38,6 +38,13 @@ users/{uid}/
   memory/{topicId}     { text, updatedAt, srvUpdatedAt }
   events/{eventId}     { title, date, time, endTime, allDay, notes, createdAt, updatedAt, srvUpdatedAt }
   tasks/{taskId}       { title, notes, days[], onceDate, time, done[], createdAt, updatedAt, srvUpdatedAt }
+  accounts/{accountId} { title, kind, openingBalance, includeInFree, archived, order, notes, createdAt, updatedAt, srvUpdatedAt }
+  categories/{catId}   { title, kind, group, essential, icon, archived, order, createdAt, updatedAt, srvUpdatedAt }
+  transactions/{txId}  { date, type, amount, accountId, toAccountId, categoryId, payee, notes, obligationId, createdAt, updatedAt, srvUpdatedAt }
+  budgets/{YYYY-MM}    { expectedIncome, savingsTarget, lines[{categoryId,limit}], notes, createdAt, updatedAt, srvUpdatedAt }
+  obligations/{obId}   { title, kind, amount, frequency, dueDay, dueDate, active, remind, categoryId, accountId, assetId, notes, createdAt, updatedAt, srvUpdatedAt }
+  assets/{assetId}     { title, kind, assetClass, value, ratePercent, notes, createdAt, updatedAt, srvUpdatedAt }
+  snapshots/{YYYY-MM-DD} { date, assetsTotal, liabilitiesTotal, netWorth, notes, createdAt, updatedAt, srvUpdatedAt }
   push/{deviceId}      { endpoint, keys{p256dh,auth}, label, ua, timeZone, updatedAt }
   pushPlan/{deviceId}  { items[{key,at,title,body,tag,url}], leadMinutes, timeZone, version, testAt? }
   pushState/{deviceId} { sent{key:ISO}, lastRunAt, lastTestAt, lastError, updatedAt }
@@ -51,6 +58,26 @@ users/{uid}/
 Дела (`tasks`) — повторяющиеся задачи. `days` — дни недели `0…6` (0 — понедельник),
 `onceDate` — дата разового дела (тогда `days` пуст), `done` — история отметок по датам.
 Удаление темы дел не затрагивает.
+
+### Бюджет в облаке
+
+Семь коллекций бюджета устроены так же, как события и дела: белый список полей, `updatedAt`
+и `dirty` на устройстве, разрешение конфликтов «побеждает более новый». Особенности:
+
+- **Суммы — целые копейки** и на устройстве, и в облаке. Это важно: `normalizeAccount` и
+  другие нормализаторы числа не пересчитывают, иначе сумма при каждом круге синхронизации
+  умножалась бы на 100.
+- `budgets/{YYYY-MM}` — id документа равен месяцу. Бюджет января один на всех устройствах,
+  а кривой id (не «ГГГГ-ММ») движок отбрасывает.
+- `snapshots/{YYYY-MM-DD}` — один снимок капитала в день; `netWorth` при приёме
+  пересчитывается как `assetsTotal − liabilitiesTotal`, а не берётся из документа.
+- `transactions` без валидной даты, нулевой суммы или без счёта не применяются: такая
+  операция не участвует ни в остатке, ни в потоке.
+- Надгробия (`account`, `category`, `transaction`, `budget`, `obligation`, `asset`,
+  `snapshot`) удаляют локальную строку, только если она не новее самого надгробия.
+- `accounts` и `obligations` на устройствах не связаны жёстко: если счёт удалён, его операции
+  остаются в журнале, но перестают попадать в остатки. Поэтому клиент не даёт удалить счёт
+  с операциями — только архив.
 
 Коллекции `push`, `pushPlan`, `pushState` — не данные ученика, а транспорт напоминаний:
 их пишет только клиент (подписка устройства и готовый план на две недели), а `pushState`

@@ -2,8 +2,10 @@
   import { onMount } from 'svelte';
   import Toasts from './lib/components/Toasts.svelte';
   import AssistantPage from './lib/pages/AssistantPage.svelte';
+  import BudgetPage from './lib/pages/BudgetPage.svelte';
   import CalendarPage from './lib/pages/CalendarPage.svelte';
   import LibraryPage from './lib/pages/LibraryPage.svelte';
+  import MorePage from './lib/pages/MorePage.svelte';
   import NewTopicPage from './lib/pages/NewTopicPage.svelte';
   import SettingsPage from './lib/pages/SettingsPage.svelte';
   import TasksPage from './lib/pages/TasksPage.svelte';
@@ -18,13 +20,25 @@
 
   let booted = $state(false);
 
+  // Боковая панель на широком экране — все разделы.
   const NAV = [
     { path: '/', key: 'topics', label: 'Темы', icon: '📚' },
     { path: '/calendar', key: 'calendar', label: 'Календарь', icon: '🗓' },
     { path: '/tasks', key: 'tasks', label: 'Дела', icon: '✅' },
+    { path: '/budget', key: 'budget', label: 'Бюджет', icon: '💰' },
     { path: '/assistant', key: 'assistant', label: 'Помощник', icon: '🤖' },
     { path: '/library', key: 'library', label: 'Библиотека', icon: '📖' },
     { path: '/settings', key: 'settings', label: 'Настройки', icon: '⚙️' }
+  ];
+
+  // Нижняя панель — шесть пунктов: библиотека и настройки живут в «Ещё».
+  const BOTTOM_NAV = [
+    { path: '/', key: 'topics', label: 'Темы', icon: '📚' },
+    { path: '/calendar', key: 'calendar', label: 'Календарь', icon: '🗓' },
+    { path: '/tasks', key: 'tasks', label: 'Дела', icon: '✅' },
+    { path: '/budget', key: 'budget', label: 'Бюджет', icon: '💰' },
+    { path: '/assistant', key: 'assistant', label: 'Помощник', icon: '🤖' },
+    { path: '/more', key: 'more', label: 'Ещё', icon: '⋯' }
   ];
 
   onMount(() => {
@@ -63,6 +77,10 @@
 
   const route = $derived(router.route);
   const current = $derived(route.name === 'topic' ? 'topics' : route.name);
+  /** В нижней панели «Библиотека» и «Настройки» подсвечивают «Ещё». */
+  const bottomCurrent = $derived(
+    current === 'library' || current === 'settings' ? 'more' : current
+  );
   const topicId = $derived(route.name === 'topic' ? route.id : '');
   const topicTab = $derived(route.name === 'topic' ? route.tab : 'plan');
 </script>
@@ -116,10 +134,14 @@
         <CalendarPage />
       {:else if route.name === 'tasks'}
         <TasksPage />
+      {:else if route.name === 'budget'}
+        <BudgetPage tab={route.tab} />
       {:else if route.name === 'assistant'}
         <AssistantPage />
       {:else if route.name === 'library'}
         <LibraryPage />
+      {:else if route.name === 'more'}
+        <MorePage />
       {:else if route.name === 'settings'}
         <SettingsPage />
       {:else}
@@ -130,8 +152,8 @@
     </main>
 
     <nav class="bottom">
-      {#each NAV as item (item.path)}
-        <button class:active={current === item.key} onclick={() => router.go(item.path)}>
+      {#each BOTTOM_NAV as item (item.path)}
+        <button class:active={bottomCurrent === item.key} onclick={() => router.go(item.path)}>
           <span class="ico">{item.icon}</span>
           <span class="lbl">{item.label}</span>
         </button>

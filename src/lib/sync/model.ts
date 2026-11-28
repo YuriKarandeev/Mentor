@@ -3,7 +3,14 @@
  * поэтому модуль легко проверять отдельным скриптом (npm run test:sync).
  */
 import type {
+  BudgetAsset,
+  BudgetCategory,
+  BudgetObligation,
+  BudgetSnapshot,
+  BudgetTransaction,
   MemoryRow,
+  MoneyAccount,
+  MonthBudget,
   Note,
   Plan,
   PlannerEvent,
@@ -13,6 +20,16 @@ import type {
   Topic,
   Tombstone
 } from '../db/db';
+import {
+  normalizeAccount,
+  normalizeAsset,
+  normalizeBudget,
+  normalizeCategory,
+  normalizeObligation,
+  normalizeSnapshot,
+  normalizeTransaction,
+  validMonth
+} from '../utils/budget.ts';
 import { AI_MAX_NOTES, AI_MAX_TITLE, text, validDate, validTime } from '../utils/planner.ts';
 import { normalizeDoneDates, normalizeDays } from '../utils/tasks.ts';
 
@@ -24,7 +41,14 @@ export type SyncedCollection =
   | 'notes'
   | 'memory'
   | 'events'
-  | 'tasks';
+  | 'tasks'
+  | 'accounts'
+  | 'categories'
+  | 'transactions'
+  | 'budgets'
+  | 'obligations'
+  | 'assets'
+  | 'snapshots';
 
 export const SYNCED_COLLECTIONS: SyncedCollection[] = [
   'topics',
@@ -33,7 +57,14 @@ export const SYNCED_COLLECTIONS: SyncedCollection[] = [
   'notes',
   'memory',
   'events',
-  'tasks'
+  'tasks',
+  'accounts',
+  'categories',
+  'transactions',
+  'budgets',
+  'obligations',
+  'assets',
+  'snapshots'
 ];
 
 export const COLLECTION_PROFILE = 'profile';
@@ -67,6 +98,20 @@ export function collectionForTombstone(type: Tombstone['type']): string {
       return 'events';
     case 'task':
       return 'tasks';
+    case 'account':
+      return 'accounts';
+    case 'category':
+      return 'categories';
+    case 'transaction':
+      return 'transactions';
+    case 'budget':
+      return 'budgets';
+    case 'obligation':
+      return 'obligations';
+    case 'asset':
+      return 'assets';
+    case 'snapshot':
+      return 'snapshots';
   }
 }
 
@@ -256,7 +301,202 @@ export function toRemoteProfile(profile: Profile): Record<string, unknown> {
   };
 }
 
+/* --- Бюджет: суммы в облаке тоже в копейках --- */
+
+export function toRemoteAccount(row: MoneyAccount): Record<string, unknown> {
+  return {
+    title: row.title,
+    kind: row.kind,
+    openingBalance: row.openingBalance,
+    includeInFree: row.includeInFree,
+    archived: row.archived,
+    order: row.order,
+    notes: row.notes,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function fromRemoteAccount(id: string, data: Record<string, unknown>): MoneyAccount {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    ...normalizeAccount(data),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+export function toRemoteCategory(row: BudgetCategory): Record<string, unknown> {
+  return {
+    title: row.title,
+    kind: row.kind,
+    group: row.group,
+    essential: row.essential,
+    icon: row.icon,
+    archived: row.archived,
+    order: row.order,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function fromRemoteCategory(id: string, data: Record<string, unknown>): BudgetCategory {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    ...normalizeCategory(data),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+/**
+ * Операция в облако. `amount` — целые копейки; `normalizeTransaction`
+ * на обратном пути числа не пересчитывает, поэтому суммы не «размножаются».
+ */
+export function toRemoteTransaction(row: BudgetTransaction): Record<string, unknown> {
+  return {
+    date: row.date,
+    type: row.type,
+    amount: row.amount,
+    accountId: row.accountId,
+    toAccountId: row.toAccountId,
+    categoryId: row.categoryId,
+    payee: row.payee,
+    notes: row.notes,
+    obligationId: row.obligationId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function fromRemoteTransaction(id: string, data: Record<string, unknown>): BudgetTransaction {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    ...normalizeTransaction(data),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+export function toRemoteBudget(row: MonthBudget): Record<string, unknown> {
+  return {
+    expectedIncome: row.expectedIncome,
+    savingsTarget: row.savingsTarget,
+    notes: row.notes,
+    lines: row.lines.map((line) => ({ categoryId: line.categoryId, limit: line.limit })),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+/** `id` документа — сам месяц: бюджет января один на всех устройствах. */
+export function fromRemoteBudget(id: string, data: Record<string, unknown>): MonthBudget {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    ...normalizeBudget(data),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+export function toRemoteObligation(row: BudgetObligation): Record<string, unknown> {
+  return {
+    title: row.title,
+    kind: row.kind,
+    amount: row.amount,
+    frequency: row.frequency,
+    dueDay: row.dueDay,
+    dueDate: row.dueDate,
+    active: row.active,
+    remind: row.remind,
+    categoryId: row.categoryId,
+    accountId: row.accountId,
+    assetId: row.assetId,
+    notes: row.notes,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function fromRemoteObligation(id: string, data: Record<string, unknown>): BudgetObligation {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    ...normalizeObligation(data),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+export function toRemoteAsset(row: BudgetAsset): Record<string, unknown> {
+  return {
+    title: row.title,
+    kind: row.kind,
+    assetClass: row.assetClass,
+    value: row.value,
+    ratePercent: row.ratePercent,
+    notes: row.notes,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function fromRemoteAsset(id: string, data: Record<string, unknown>): BudgetAsset {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    ...normalizeAsset(data),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+export function toRemoteSnapshot(row: BudgetSnapshot): Record<string, unknown> {
+  return {
+    date: row.date,
+    assetsTotal: row.assetsTotal,
+    liabilitiesTotal: row.liabilitiesTotal,
+    netWorth: row.netWorth,
+    notes: row.notes,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function fromRemoteSnapshot(id: string, data: Record<string, unknown>): BudgetSnapshot {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    ...normalizeSnapshot(data),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+/** Бюджетный месяц из id документа: всё, что не «ГГГГ-ММ», считаем мусором. */
+export function budgetMonthOf(id: string): string {
+  return validMonth(id);
+}
+
 export function chunk<T>(items: T[], size: number = MAX_BATCH_WRITES): T[][] {
+
   const step = size > 0 ? size : MAX_BATCH_WRITES;
   const pages: T[][] = [];
   for (let i = 0; i < items.length; i += step) pages.push(items.slice(i, i + step));
