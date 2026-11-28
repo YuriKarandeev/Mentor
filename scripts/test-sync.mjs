@@ -142,7 +142,7 @@ check(chunks.length === 3 && chunks[2].length === 100, 'чанкование р�
 check(model.chunk([], 10).length === 0, 'пустой список не даёт батчей');
 
 check(
-  model.SYNCED_COLLECTIONS.length === 14 &&
+  model.SYNCED_COLLECTIONS.length === 16 &&
     [
       'topics',
       'plans',
@@ -151,6 +151,8 @@ check(
       'memory',
       'events',
       'tasks',
+      'projects',
+      'projectCards',
       'accounts',
       'categories',
       'transactions',
@@ -160,7 +162,7 @@ check(
       'snapshots'
     ].every((name) => model.SYNCED_COLLECTIONS.includes(name)) &&
     !model.SYNCED_COLLECTIONS.includes('kv'),
-  'в облако уходят данные и бюджет, но не таблица настроек kv'
+  'в облако уходят данные, проекты и бюджет, но не таблица настроек kv'
 );
 
 check(

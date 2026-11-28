@@ -7,6 +7,7 @@
   import LibraryPage from './lib/pages/LibraryPage.svelte';
   import MorePage from './lib/pages/MorePage.svelte';
   import NewTopicPage from './lib/pages/NewTopicPage.svelte';
+  import ProjectsPage from './lib/pages/ProjectsPage.svelte';
   import SettingsPage from './lib/pages/SettingsPage.svelte';
   import TasksPage from './lib/pages/TasksPage.svelte';
   import TopicPage from './lib/pages/TopicPage.svelte';
@@ -25,6 +26,7 @@
     { path: '/', key: 'topics', label: 'Темы', icon: '📚' },
     { path: '/calendar', key: 'calendar', label: 'Календарь', icon: '🗓' },
     { path: '/tasks', key: 'tasks', label: 'Дела', icon: '✅' },
+    { path: '/projects', key: 'projects', label: 'Проекты', icon: '📋' },
     { path: '/budget', key: 'budget', label: 'Бюджет', icon: '💰' },
     { path: '/assistant', key: 'assistant', label: 'Помощник', icon: '🤖' },
     { path: '/library', key: 'library', label: 'Библиотека', icon: '📖' },
@@ -79,10 +81,11 @@
   const current = $derived(route.name === 'topic' ? 'topics' : route.name);
   /** В нижней панели «Библиотека» и «Настройки» подсвечивают «Ещё». */
   const bottomCurrent = $derived(
-    current === 'library' || current === 'settings' ? 'more' : current
+    current === 'library' || current === 'settings' || current === 'projects' ? 'more' : current
   );
   const topicId = $derived(route.name === 'topic' ? route.id : '');
   const topicTab = $derived(route.name === 'topic' ? route.tab : 'plan');
+  const projectId = $derived(route.name === 'projects' ? route.id : '');
 </script>
 
 {#if !booted}
@@ -134,6 +137,8 @@
         <CalendarPage />
       {:else if route.name === 'tasks'}
         <TasksPage />
+      {:else if route.name === 'projects'}
+        <ProjectsPage id={projectId} />
       {:else if route.name === 'budget'}
         <BudgetPage tab={route.tab} />
       {:else if route.name === 'assistant'}

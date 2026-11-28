@@ -46,6 +46,20 @@ import {
   normalizeDays,
   withTaskDone
 } from '../utils/tasks';
+import {
+  CARD_MAX_NOTES,
+  CARD_MAX_TITLE,
+  PROJECT_MAX_NOTES,
+  PROJECT_MAX_TITLE,
+  compareProjects,
+  nextOrder,
+  normalizeColumn,
+  normalizeOrder,
+  planMove,
+  planShift,
+  type CardColumn,
+  type CardOrderPatch
+} from '../utils/projects';
 
 export type Level = 'новичок' | 'средний' | 'продвинутый';
 export type ItemKind = 'theory' | 'practice' | 'check';
@@ -66,6 +80,8 @@ export type SyncEntity =
   | 'profile'
   | 'event'
   | 'task'
+  | 'project'
+  | 'projectCard'
   | 'account'
   | 'category'
   | 'transaction'
@@ -197,6 +213,43 @@ export interface PlannerTask {
   dirty: DirtyFlag;
 }
 
+/** Статус проекта: активный, на паузе или завершён. */
+export type ProjectStatus = 'active' | 'paused' | 'done';
+
+/**
+ * Проект — это канбан-доска со своим названием, целью и сроком.
+ * Карточки лежат отдельно (`ProjectCard`), чтобы перенос одной карточки
+ * не переписывал весь проект целиком.
+ */
+export interface Project {
+  id: string;
+  title: string;
+  goal: string;
+  notes: string;
+  status: ProjectStatus;
+  /** Локальная дата «ГГГГ-ММ-ДД»; пустая строка — без срока. */
+  dueDate: string;
+  createdAt: number;
+  updatedAt: number;
+  dirty: DirtyFlag;
+}
+
+/** Карточка канбана: живёт в колонке проекта, `order` задаёт место в колонке. */
+export interface ProjectCard {
+  id: string;
+  projectId: string;
+  title: string;
+  notes: string;
+  /** todo — «Надо», doing — «В работе», done — «Готово». */
+  column: CardColumn;
+  /** Место внутри колонки, 0 — первая карточка. */
+  order: number;
+  dueDate: string;
+  createdAt: number;
+  updatedAt: number;
+  dirty: DirtyFlag;
+}
+
 /** Счёт, на котором лежат деньги. Остаток не хранится: он считается по операциям. */
 export interface MoneyAccount extends AccountData {
   id: string;
@@ -299,7 +352,7 @@ export interface KvRow {
 export const DEFAULT_PROFILE: Profile = { goals: [], interests: [], updatedAt: 0 };
 
 /** Версия схемы; растёт вместе с миграциями в StudyDB. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 function backfillV2(row: { createdAt?: number; updatedAt?: number; dirty?: DirtyFlag }, stamp: number): void {
   row.updatedAt = row.updatedAt ?? row.createdAt ?? stamp;
@@ -345,6 +398,8 @@ class StudyDB extends Dexie {
   memory!: Table<MemoryRow, string>;
   events!: Table<PlannerEvent, string>;
   tasks!: Table<PlannerTask, string>;
+  projects!: Table<Project, string>;
+  projectCards!: Table<ProjectCard, string>;
   accounts!: Table<MoneyAccount, string>;
   categories!: Table<BudgetCategory, string>;
   transactions!: Table<BudgetTransaction, string>;
@@ -397,6 +452,13 @@ class StudyDB extends Dexie {
       obligations: 'id, dueDay, updatedAt, dirty',
       assets: 'id, kind, updatedAt, dirty',
       snapshots: 'id, date, updatedAt, dirty'
+    });
+
+    // v6: проекты и их канбан-доска. Две новые таблицы, старые данные не трогаем.
+    // В индексах только строки и числа: булевы поля IndexedDB ключами не делает.
+    this.version(6).stores({
+      projects: 'id, status, updatedAt, dirty',
+      projectCards: 'id, projectId, column, updatedAt, dirty'
     });
   }
 }
@@ -461,6 +523,8 @@ export async function countPending(): Promise<number> {
     db.memory.where('dirty').equals(1).count(),
     db.events.where('dirty').equals(1).count(),
     db.tasks.where('dirty').equals(1).count(),
+    db.projects.where('dirty').equals(1).count(),
+    db.projectCards.where('dirty').equals(1).count(),
     db.accounts.where('dirty').equals(1).count(),
     db.categories.where('dirty').equals(1).count(),
     db.transactions.where('dirty').equals(1).count(),
@@ -965,6 +1029,208 @@ export async function applyPlannerChanges(changes: {
     }
     if (tasks?.restore && tasks.restore.length > 0) {
       await db.tombstones.bulkDelete(tasks.restore.map((id) => `task:${id}`));
+    }
+  });
+  notifyLocalChange();
+}
+
+/* ------------------------------------------------------------------ проекты */
+
+export interface ProjectInput {
+  id?: string;
+  title: string;
+  goal?: string;
+  notes?: string;
+  status?: ProjectStatus;
+  dueDate?: string;
+}
+
+export interface ProjectCardInput {
+  id?: string;
+  projectId: string;
+  title: string;
+  notes?: string;
+  column?: CardColumn | string;
+  dueDate?: string;
+}
+
+function normalizeProjectStatus(value: unknown): ProjectStatus {
+  return value === 'paused' || value === 'done' ? value : 'active';
+}
+
+/** Проект без названия не существует; срок принимается только настоящий. */
+function normalizeProjectFields(
+  input: ProjectInput
+): Pick<Project, 'title' | 'goal' | 'notes' | 'status' | 'dueDate'> {
+  const title = text(input.title, PROJECT_MAX_TITLE);
+  if (!title) throw new Error('У проекта должно быть название');
+  return {
+    title,
+    goal: text(input.goal, PROJECT_MAX_TITLE),
+    notes: text(input.notes, PROJECT_MAX_NOTES),
+    status: normalizeProjectStatus(input.status),
+    dueDate: validDate(input.dueDate)
+  };
+}
+
+/** Карточка всегда принадлежит проекту; битая колонка становится «Надо». */
+function normalizeCardFields(
+  input: ProjectCardInput
+): Pick<ProjectCard, 'projectId' | 'title' | 'notes' | 'column' | 'dueDate'> {
+  const title = text(input.title, CARD_MAX_TITLE);
+  const projectId = text(input.projectId);
+  if (!title) throw new Error('У карточки должно быть название');
+  if (!projectId) throw new Error('Карточка должна принадлежать проекту');
+  return {
+    projectId,
+    title,
+    notes: text(input.notes, CARD_MAX_NOTES),
+    column: normalizeColumn(input.column),
+    dueDate: validDate(input.dueDate)
+  };
+}
+
+/** Проекты: сначала активные, затем пауза и завершённые. */
+export async function allProjects(): Promise<Project[]> {
+  const rows = await db.projects.toArray();
+  return rows.sort(compareProjects);
+}
+
+export async function addProject(input: ProjectInput): Promise<Project> {
+  const ts = now();
+  const project: Project = {
+    id: input.id ?? uid('proj'),
+    ...normalizeProjectFields(input),
+    createdAt: ts,
+    updatedAt: ts,
+    dirty: 1
+  };
+  await db.projects.add(project);
+  notifyLocalChange();
+  return project;
+}
+
+export async function updateProject(
+  id: string,
+  patch: Partial<ProjectInput>
+): Promise<Project | undefined> {
+  const existing = await db.projects.get(id);
+  if (!existing) return undefined;
+  const merged = normalizeProjectFields({
+    title: patch.title ?? existing.title,
+    goal: patch.goal ?? existing.goal,
+    notes: patch.notes ?? existing.notes,
+    status: patch.status ?? existing.status,
+    dueDate: patch.dueDate ?? existing.dueDate
+  });
+  const row: Project = { ...existing, ...merged, updatedAt: now(), dirty: 1 };
+  await db.projects.put(row);
+  notifyLocalChange();
+  return row;
+}
+
+/** Удаление проекта вместе с карточками: в облако уходят надгробия обеих таблиц. */
+export async function removeProject(id: string): Promise<void> {
+  const ts = now();
+  await db.transaction('rw', [db.projects, db.projectCards, db.tombstones], async () => {
+    const cardIds = (await db.projectCards.where('projectId').equals(id).primaryKeys()) as string[];
+    const project = await db.projects.get(id);
+    await db.projects.delete(id);
+    await db.projectCards.where('projectId').equals(id).delete();
+    const rows: Tombstone[] = cardIds.map((cardId) => tombstoneOf('projectCard', cardId, ts));
+    if (project) rows.push(tombstoneOf('project', id, ts));
+    if (rows.length > 0) await db.tombstones.bulkPut(rows);
+  });
+  notifyLocalChange();
+}
+
+
+export async function allProjectCards(): Promise<ProjectCard[]> {
+  return db.projectCards.toArray();
+}
+
+export async function addProjectCard(input: ProjectCardInput): Promise<ProjectCard> {
+  const fields = normalizeCardFields(input);
+  const siblings = await db.projectCards.where('projectId').equals(fields.projectId).toArray();
+  const ts = now();
+  const card: ProjectCard = {
+    id: input.id ?? uid('card'),
+    ...fields,
+    // Новая карточка встаёт в конец своей колонки.
+    order: nextOrder(siblings, fields.column),
+    createdAt: ts,
+    updatedAt: ts,
+    dirty: 1
+  };
+  await db.projectCards.add(card);
+  notifyLocalChange();
+  return card;
+}
+
+export async function updateProjectCard(
+  id: string,
+  patch: Partial<ProjectCardInput>
+): Promise<ProjectCard | undefined> {
+  const existing = await db.projectCards.get(id);
+  if (!existing) return undefined;
+  const merged = normalizeCardFields({
+    projectId: patch.projectId ?? existing.projectId,
+    title: patch.title ?? existing.title,
+    notes: patch.notes ?? existing.notes,
+    column: patch.column ?? existing.column,
+    dueDate: patch.dueDate ?? existing.dueDate
+  });
+  // Смена колонки через редактор ставит карточку в конец — так же, как кнопка
+  // «в работу». Порядок остальных карточек при этом не меняется.
+  let order = normalizeOrder(existing.order);
+  if (merged.column !== existing.column || merged.projectId !== existing.projectId) {
+    const siblings = await db.projectCards.where('projectId').equals(merged.projectId).toArray();
+    order = nextOrder(siblings.filter((card) => card.id !== id), merged.column);
+  }
+  const row: ProjectCard = { ...existing, ...merged, order, updatedAt: now(), dirty: 1 };
+  await db.projectCards.put(row);
+  notifyLocalChange();
+  return row;
+}
+
+export async function removeProjectCard(id: string): Promise<void> {
+  const ts = now();
+  await db.transaction('rw', [db.projectCards, db.tombstones], async () => {
+    const card = await db.projectCards.get(id);
+    await db.projectCards.delete(id);
+    if (card) await db.tombstones.put(tombstoneOf('projectCard', id, ts));
+  });
+  notifyLocalChange();
+}
+
+/** Перенос карточки в другую колонку — в конец её списка. */
+export async function moveProjectCard(id: string, column: CardColumn): Promise<void> {
+  const card = await db.projectCards.get(id);
+  if (!card) return;
+  const siblings = await db.projectCards.where('projectId').equals(card.projectId).toArray();
+  await applyCardPatches(planMove(siblings, id, column));
+}
+
+/** Сдвиг карточки внутри колонки: −1 выше, +1 ниже. */
+export async function shiftProjectCard(id: string, delta: number): Promise<void> {
+  const card = await db.projectCards.get(id);
+  if (!card) return;
+  const siblings = await db.projectCards.where('projectId').equals(card.projectId).toArray();
+  await applyCardPatches(planShift(siblings, id, delta));
+}
+
+/** Запись «плана перемещения»: одна транзакция на всю колонку. */
+async function applyCardPatches(patches: CardOrderPatch[]): Promise<void> {
+  if (patches.length === 0) return;
+  const ts = now();
+  await db.transaction('rw', [db.projectCards], async () => {
+    for (const patch of patches) {
+      await db.projectCards.update(patch.id, {
+        column: patch.column,
+        order: patch.order,
+        updatedAt: ts,
+        dirty: 1
+      });
     }
   });
   notifyLocalChange();
@@ -1571,6 +1837,8 @@ export async function wipeAll(): Promise<void> {
       db.memory,
       db.events,
       db.tasks,
+      db.projects,
+      db.projectCards,
       db.accounts,
       db.categories,
       db.transactions,
@@ -1589,6 +1857,8 @@ export async function wipeAll(): Promise<void> {
       const memoryIds = (await db.memory.toCollection().primaryKeys()) as string[];
       const eventIds = (await db.events.toCollection().primaryKeys()) as string[];
       const taskIds = (await db.tasks.toCollection().primaryKeys()) as string[];
+      const projectIds = (await db.projects.toCollection().primaryKeys()) as string[];
+      const projectCardIds = (await db.projectCards.toCollection().primaryKeys()) as string[];
       const accountIds = (await db.accounts.toCollection().primaryKeys()) as string[];
       const categoryIds = (await db.categories.toCollection().primaryKeys()) as string[];
       const transactionIds = (await db.transactions.toCollection().primaryKeys()) as string[];
@@ -1606,6 +1876,8 @@ export async function wipeAll(): Promise<void> {
         ...memoryIds.map((id) => tombstoneOf('memory', id, ts)),
         ...eventIds.map((id) => tombstoneOf('event', id, ts)),
         ...taskIds.map((id) => tombstoneOf('task', id, ts)),
+        ...projectIds.map((id) => tombstoneOf('project', id, ts)),
+        ...projectCardIds.map((id) => tombstoneOf('projectCard', id, ts)),
         ...accountIds.map((id) => tombstoneOf('account', id, ts)),
         ...categoryIds.map((id) => tombstoneOf('category', id, ts)),
         ...transactionIds.map((id) => tombstoneOf('transaction', id, ts)),
@@ -1624,6 +1896,8 @@ export async function wipeAll(): Promise<void> {
       await db.memory.clear();
       await db.events.clear();
       await db.tasks.clear();
+      await db.projects.clear();
+      await db.projectCards.clear();
       await db.accounts.clear();
       await db.categories.clear();
       await db.transactions.clear();

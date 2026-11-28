@@ -435,6 +435,8 @@
       memory: await db.memory.toArray(),
       events: await db.events.toArray(),
       tasks: await db.tasks.toArray(),
+      projects: await db.projects.toArray(),
+      projectCards: await db.projectCards.toArray(),
       accounts: await db.accounts.toArray(),
       categories: await db.categories.toArray(),
       transactions: await db.transactions.toArray(),
@@ -481,6 +483,8 @@
           db.memory,
           db.events,
           db.tasks,
+          db.projects,
+          db.projectCards,
           db.accounts,
           db.categories,
           db.transactions,
@@ -498,6 +502,10 @@
           if (Array.isArray(json.memory)) await db.memory.bulkPut(json.memory as never[]);
           if (Array.isArray(json.events)) await db.events.bulkPut(normalizeRows(json.events));
           if (Array.isArray(json.tasks)) await db.tasks.bulkPut(normalizeRows(json.tasks));
+          if (Array.isArray(json.projects)) await db.projects.bulkPut(normalizeRows(json.projects));
+          if (Array.isArray(json.projectCards)) {
+            await db.projectCards.bulkPut(normalizeRows(json.projectCards));
+          }
           if (Array.isArray(json.accounts)) await db.accounts.bulkPut(normalizeRows(json.accounts));
           if (Array.isArray(json.categories)) {
             await db.categories.bulkPut(normalizeRows(json.categories));

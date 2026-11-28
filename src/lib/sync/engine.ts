@@ -46,6 +46,8 @@ import {
   fromRemoteCategory,
   fromRemoteEvent,
   fromRemoteObligation,
+  fromRemoteProject,
+  fromRemoteProjectCard,
   fromRemoteSnapshot,
   fromRemoteTask,
   fromRemoteTransaction,
@@ -62,6 +64,8 @@ import {
   toRemoteObligation,
   toRemotePlan,
   toRemoteProfile,
+  toRemoteProject,
+  toRemoteProjectCard,
   toRemoteSnapshot,
   toRemoteTask,
   toRemoteTopic,
@@ -462,6 +466,24 @@ async function applyRemote(
       await db.tasks.put(row);
       return true;
     }
+    case 'projects': {
+      const row = fromRemoteProject(id, data);
+      // Проект без названия на доске не показать — такое не сохраняем.
+      if (!row.title) return false;
+      const local = await db.projects.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.projects.put(row);
+      return true;
+    }
+    case 'projectCards': {
+      const row = fromRemoteProjectCard(id, data);
+      // Карточка без проекта — сирота, её некуда положить.
+      if (!row.title || !row.projectId) return false;
+      const local = await db.projectCards.get(id);
+      if (!shouldApply(local, { updatedAt })) return false;
+      await db.projectCards.put(row);
+      return true;
+    }
     case 'accounts': {
       const row = fromRemoteAccount(id, data);
       const local = await db.accounts.get(id);
@@ -667,6 +689,22 @@ async function applyTombstone(type: SyncEntity, refId: string, deletedAt: number
       await db.tasks.delete(refId);
       return true;
     }
+    case 'project': {
+      const local = await db.projects.get(refId);
+      if (!local || deletedAt < local.updatedAt) return false;
+      // Карточки удалённого проекта не должны остаться сиротами локально.
+      await db.transaction('rw', [db.projects, db.projectCards], async () => {
+        await db.projects.delete(refId);
+        await db.projectCards.where('projectId').equals(refId).delete();
+      });
+      return true;
+    }
+    case 'projectCard': {
+      const local = await db.projectCards.get(refId);
+      if (!local || deletedAt < local.updatedAt) return false;
+      await db.projectCards.delete(refId);
+      return true;
+    }
     case 'account':
       return deleteBudgetRow('accounts', refId, deletedAt);
     case 'category':
@@ -756,6 +794,18 @@ async function collectDirty(name: SyncedCollection): Promise<PushRow[]> {
     case 'tasks': {
       const rows = await db.tasks.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
       return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteTask(row) }));
+    }
+    case 'projects': {
+      const rows = await db.projects.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({ id: row.id, updatedAt: row.updatedAt, payload: toRemoteProject(row) }));
+    }
+    case 'projectCards': {
+      const rows = await db.projectCards.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
+      return rows.map((row) => ({
+        id: row.id,
+        updatedAt: row.updatedAt,
+        payload: toRemoteProjectCard(row)
+      }));
     }
     case 'accounts': {
       const rows = await db.accounts.where('dirty').equals(1).limit(MAX_BATCH_WRITES).toArray();
@@ -866,6 +916,7 @@ async function pushTombstones(current: Ctx): Promise<number> {
 
   for (const tomb of rows) {
     if (tomb.type === 'topic') await deleteRemoteTopicChildren(current, tomb.refId);
+    if (tomb.type === 'project') await deleteRemoteProjectCards(current, tomb.refId);
   }
 
   const batch = fsMod.writeBatch(fsDb);
@@ -907,6 +958,22 @@ async function deleteRemoteTopicChildren(current: Ctx, topicId: string): Promise
   await fsMod.deleteDoc(fsMod.doc(fsDb, 'users', current.uid, 'memory', topicId));
 }
 
+/** Карточки удалённого проекта: страховка от «сирот» в облаке. */
+async function deleteRemoteProjectCards(current: Ctx, projectId: string): Promise<void> {
+  const { fsMod, db: fsDb } = current.fb;
+  const snapshot = await fsMod.getDocs(
+    fsMod.query(
+      fsMod.collection(fsDb, 'users', current.uid, 'projectCards'),
+      fsMod.where('projectId', '==', projectId),
+      fsMod.limit(MAX_BATCH_WRITES)
+    )
+  );
+  if (snapshot.empty) return;
+  const batch = fsMod.writeBatch(fsDb);
+  for (const docSnap of snapshot.docs) batch.delete(docSnap.ref);
+  await batch.commit();
+}
+
 /**
  * Очистка облачной копии: локальные данные остаются, но помечаются
  * надгробиями, поэтому удаление уходит в Firestore.
@@ -923,6 +990,8 @@ export async function wipeCloud(): Promise<void> {
   const memoryIds = (await db.memory.toCollection().primaryKeys()) as string[];
   const eventIds = (await db.events.toCollection().primaryKeys()) as string[];
   const taskIds = (await db.tasks.toCollection().primaryKeys()) as string[];
+  const projectIds = (await db.projects.toCollection().primaryKeys()) as string[];
+  const projectCardIds = (await db.projectCards.toCollection().primaryKeys()) as string[];
 
   rows.push(...topicIds.map((id) => tombstoneOf('topic', id, ts)));
   rows.push(...planIds.map((id) => tombstoneOf('plan', id, ts)));
@@ -931,6 +1000,8 @@ export async function wipeCloud(): Promise<void> {
   rows.push(...memoryIds.map((id) => tombstoneOf('memory', id, ts)));
   rows.push(...eventIds.map((id) => tombstoneOf('event', id, ts)));
   rows.push(...taskIds.map((id) => tombstoneOf('task', id, ts)));
+  rows.push(...projectIds.map((id) => tombstoneOf('project', id, ts)));
+  rows.push(...projectCardIds.map((id) => tombstoneOf('projectCard', id, ts)));
   if (await db.kv.get(PROFILE_KEY)) rows.push(tombstoneOf('profile', PROFILE_DOC_ID, ts));
 
   if (rows.length > 0) await db.tombstones.bulkPut(rows);

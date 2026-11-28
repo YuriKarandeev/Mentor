@@ -9,6 +9,7 @@ export type Route =
   | { name: 'topic'; id: string; tab: TopicTab }
   | { name: 'calendar' }
   | { name: 'tasks' }
+  | { name: 'projects'; id: string }
   | { name: 'budget'; tab: BudgetTab }
   | { name: 'assistant' }
   | { name: 'library' }
@@ -39,6 +40,9 @@ function parse(hash: string): Route {
   if (head === 'new') return { name: 'new-topic' };
   if (head === 'calendar') return { name: 'calendar' };
   if (head === 'tasks') return { name: 'tasks' };
+  if (head === 'projects') {
+    return { name: 'projects', id: parts[1] ? decodeURIComponent(parts[1]) : '' };
+  }
   if (head === 'budget') {
     const tab = (parts[1] ?? 'overview') as BudgetTab;
     return { name: 'budget', tab: BUDGET_TABS.includes(tab) ? tab : 'overview' };

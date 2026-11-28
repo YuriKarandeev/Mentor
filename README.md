@@ -28,6 +28,10 @@ Cloudflare, тогда ключ остаётся на сервере: он пр�
   поэтому дело не исчезает после первого выполнения. Помощник умеет `task.create/update/delete/done`
   («добавь зарядку каждый день в 8:00», «отметь, что я сделал зарядку»), а список дел выбранного
   дня виден и в календаре.
+- **Проекты и канбан.** У проекта есть цель, срок и статус, а работа идёт карточками по трём
+  колонкам: «Надо», «В работе», «Готово». Карточку переносят кнопками ← → или поднимают/опускают
+  внутри колонки, прогресс считается по готовым. Доска и карточки синхронизируются, попадают
+  в экспорт JSON, а удаление проекта уносит его карточки и из облака.
 - **Бюджет.** Счета, операции, конверты месяца, обязательства, активы и долги, аналитика.
   Деньги считаются в копейках, балансы и остатки конвертов вычисляются из операций, а не хранятся.
   «Свободные деньги» — это остаток на счетах минус конверты, ещё не оплаченные платежи и цель
@@ -51,7 +55,7 @@ Cloudflare, тогда ключ остаётся на сервере: он пр�
   кликом (или Enter/Space с клавиатуры) и рендерится только в раскрытом виде.
 - **Настройки.** Ключ DeepSeek API, модель, глубина рассуждений (`low`/`high`/`max`), веб-поиск (только для `deepseek-flash`), тема оформления, профиль, экспорт/импорт JSON, полная очистка. Прокси-режим (адрес воркера и `APP_TOKEN`) — в дополнительных настройках (`?advanced=1`).
 - **Синхронизация (опционально).** Вход через Google — темы, планы, чаты, конспекты, память, события календаря,
-  дела с повтором, бюджет (счета, операции, конверты, платежи, активы и снимки) и профиль зеркалятся
+  дела с повтором, проекты с карточками, бюджет (счета, операции, конверты, платежи, активы и снимки) и профиль зеркалятся
   в Firestore и подтягиваются на других устройствах. Ключ DeepSeek, токен прокси и настройки
   устройства в облако не уходят; без входа приложение работает как раньше. Подробности — [`docs/SYNC.md`](docs/SYNC.md).
 - **PWA.** Установка на телефон и десктоп, офлайн-кеш оболочки, обновление в фоне. В полноэкранном режиме
@@ -78,6 +82,7 @@ npm run test:conn  # прямой режим и прокси: пути, заго
 npm run test:plan  # связка «пункт плана ↔ конспект» и промпт конспекта
 npm run test:planner # календарь: даты, действия помощника, промпт и лимиты
 npm run test:tasks  # дела: дни недели, отметки по дням, действия task.* и промпт
+npm run test:projects # проекты: колонки, порядок карточек, прогресс и обмен с облаком
 npm run test:budget # бюджет: деньги в копейках, остатки, конверты, обязательства, капитал
 npm run test:reminders # напоминания: сводка, тихие часы, горизонт, дедупликация
 npm run test:push   # отправитель напоминаний: план, дедупликация, окно 12 ч, payload
@@ -183,7 +188,7 @@ GitHub отключает scheduled workflow после 60 дней без ак�
 Живой адрес: **https://yurikarandeev.github.io/Mentor/**
 
 Workflow `.github/workflows/deploy.yml` собирает проект и публикует `dist` при пуше в `main`
-(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → `npm run test:conn` → `npm run test:plan` → `npm run test:planner` → `npm run test:tasks` → `npm run test:budget` → `npm run test:reminders` → `npm run test:push` → иконки → `npm run build` → `npm run smoke`).
+(шаги: `npm ci` → проверка нативного биндинга rolldown → `npm run check` → `npm run test:sync` → `npm run test:stream` → `npm run test:conn` → `npm run test:plan` → `npm run test:planner` → `npm run test:tasks` → `npm run test:projects` → `npm run test:budget` → `npm run test:reminders` → `npm run test:push` → иконки → `npm run build` → `npm run smoke`).
 `BASE_PATH` подставляется автоматически: `/<repo>/`. Роутинг — hash-based, поэтому deep links
 работают без серверных rewrite-правил.
 
@@ -217,7 +222,7 @@ src/
   App.svelte               каркас: сайдбар (≥900px) и нижняя навигация
   app.css                  токены темы, кнопки, карточки, стили markdown
   lib/
-    router.svelte.ts       hash-роутер (#/topics, #/topic/<id>/<tab>, #/calendar, #/tasks, #/assistant, #/library, #/settings)
+    router.svelte.ts       hash-роутер (#/topics, #/topic/<id>/<tab>, #/calendar, #/tasks, #/projects/<id>, #/assistant, #/library, #/settings)
     theme.ts               применение темы (dark/light/system)
     api/
       conn.ts              выбор соединения: прямой ключ (api.deepseek.com) или прокси
@@ -229,18 +234,20 @@ src/
       planner-actions.ts   разбор действий event.* / task.* в безопасный вид
       planner-apply.ts     применение пачки действий и обратный набор для «Отменить»
       types.ts             типы ответов API
-    db/db.ts               Dexie v4: topics, plans, messages, notes, memory, events, tasks, kv, tombstones (+ updatedAt/dirty)
+    db/db.ts               Dexie v6: topics, plans, messages, notes, memory, events, tasks, projects, projectCards,
+                           счета и бюджет, kv, tombstones (+ updatedAt/dirty)
     utils/                 ids, format, markdown, plain (снимает прокси $state перед записью в IndexedDB),
                            plan-note (связка «пункт плана ↔ заметка-конспект» по тегу),
                            planner (даты и время событий), tasks (дни недели и отметки дел),
+                           projects (колонки канбана, порядок карточек и прогресс доски),
                            reminders (расписание напоминаний: сводка, тихие часы, горизонт)
     sync/                  синхронизация: config, firebase (ленивый SDK), model (чистые функции), engine, errors, state
     push/config.ts         публичный VAPID-ключ и параметры доставки напоминаний
     push/client.ts         Web Push: подписка браузера, план в Firestore, статус для настроек
     stores/                settings, profile, toast (runes; данные — в IndexedDB, kv)
     components/            Markdown, MessageBubble, Composer, PlanView, ItemSummary, NoteCard, Toasts,
-                           EventEditor (событие), TaskEditor (дело)
-    pages/                 Topics, NewTopic, Topic, Library, Settings, Calendar, Tasks, Assistant
+                           EventEditor (событие), TaskEditor (дело), ProjectEditor (проект), CardEditor (карточка)
+    pages/                 Topics, NewTopic, Topic, Library, Settings, Calendar, Tasks, Projects, Assistant
 worker/                    Cloudflare Worker — необязательный прокси DeepSeek
   deepseek-proxy.js        роуты /api/* и диагностика стрима
 _push/                     отправитель push-напоминаний для GitHub Actions
@@ -255,6 +262,7 @@ scripts/test-conn.mjs      прямой режим и прокси: пути, з
 scripts/test-plan-note.mjs связка «пункт плана ↔ конспект» и промпт конспекта
 scripts/test-planner.mjs   календарь: даты, действия помощника, промпт
 scripts/test-tasks.mjs     дела: дни недели, отметки по дням, действия task.*
+scripts/test-projects.mjs  проекты: колонки канбана, порядок карточек, прогресс, обмен с облаком
 scripts/test-reminders.mjs напоминания: сводка, тихие часы, горизонт, формат плана
 scripts/test-push.mjs      отправитель: созревшее, окно 12 ч, дедупликация, payload
 scripts/gen-vapid-keys.mjs генерация пары VAPID для напоминаний
@@ -262,7 +270,7 @@ scripts/gen-vapid-keys.mjs генерация пары VAPID для напоми
 
 ## Данные и приватность
 
-- Всё содержимое (темы, планы, сообщения, заметки, память, профиль, события, дела) хранится в IndexedDB браузера.
+- Всё содержимое (темы, планы, сообщения, заметки, память, профиль, события, дела, проекты) хранится в IndexedDB браузера.
 - Без входа в аккаунт данные никуда не отправляются, кроме запросов к модели.
 - Со входом через Google копия перечисленных данных лежит в вашем проекте Firebase (`users/<uid>/…`),
   доступ — только владельцу по правилам [`firestore.rules`](firestore.rules).

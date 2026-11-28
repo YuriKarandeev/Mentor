@@ -2,6 +2,7 @@
   import { router } from '../router.svelte';
 
   const LINKS = [
+    { path: '/projects', title: 'Проекты', icon: '📋', hint: 'Канбан-доски: карточки по колонкам и прогресс' },
     { path: '/library', title: 'Библиотека', icon: '📖', hint: 'Конспекты и материалы по темам' },
     { path: '/settings', title: 'Настройки', icon: '⚙️', hint: 'Ключ DeepSeek, напоминания, синхронизация, данные' }
   ];

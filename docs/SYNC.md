@@ -38,6 +38,8 @@ users/{uid}/
   memory/{topicId}     { text, updatedAt, srvUpdatedAt }
   events/{eventId}     { title, date, time, endTime, allDay, notes, createdAt, updatedAt, srvUpdatedAt }
   tasks/{taskId}       { title, notes, days[], onceDate, time, done[], createdAt, updatedAt, srvUpdatedAt }
+  projects/{projectId} { title, goal, notes, status, dueDate, createdAt, updatedAt, srvUpdatedAt }
+  projectCards/{cardId} { projectId, title, notes, column, order, dueDate, createdAt, updatedAt, srvUpdatedAt }
   accounts/{accountId} { title, kind, openingBalance, includeInFree, archived, order, notes, createdAt, updatedAt, srvUpdatedAt }
   categories/{catId}   { title, kind, group, essential, icon, archived, order, createdAt, updatedAt, srvUpdatedAt }
   transactions/{txId}  { date, type, amount, accountId, toAccountId, categoryId, payee, notes, obligationId, createdAt, updatedAt, srvUpdatedAt }
@@ -58,6 +60,12 @@ users/{uid}/
 Дела (`tasks`) — повторяющиеся задачи. `days` — дни недели `0…6` (0 — понедельник),
 `onceDate` — дата разового дела (тогда `days` пуст), `done` — история отметок по датам.
 Удаление темы дел не затрагивает.
+
+Проекты (`projects`) и их карточки (`projectCards`) — канбан-доска. `column` принимает
+`todo`, `doing` или `done`, `order` — место внутри колонки (целое число, при перемещении
+перенумеровывается без пропусков). Карточка без `projectId` или без названия не применяется.
+Удаление проекта убирает и его карточки: локально, надгробиями `project`/`projectCard`
+и отдельной зачисткой коллекции в облаке.
 
 ### Бюджет в облаке
 

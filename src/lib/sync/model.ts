@@ -16,6 +16,8 @@ import type {
   PlannerEvent,
   PlannerTask,
   Profile,
+  Project,
+  ProjectCard,
   StoredMessage,
   Topic,
   Tombstone
@@ -32,6 +34,14 @@ import {
 } from '../utils/budget.ts';
 import { AI_MAX_NOTES, AI_MAX_TITLE, text, validDate, validTime } from '../utils/planner.ts';
 import { normalizeDoneDates, normalizeDays } from '../utils/tasks.ts';
+import {
+  CARD_MAX_NOTES,
+  CARD_MAX_TITLE,
+  PROJECT_MAX_NOTES,
+  PROJECT_MAX_TITLE,
+  normalizeColumn,
+  normalizeOrder
+} from '../utils/projects.ts';
 
 /** Коллекции Firestore внутри users/{uid}. */
 export type SyncedCollection =
@@ -42,6 +52,8 @@ export type SyncedCollection =
   | 'memory'
   | 'events'
   | 'tasks'
+  | 'projects'
+  | 'projectCards'
   | 'accounts'
   | 'categories'
   | 'transactions'
@@ -58,6 +70,8 @@ export const SYNCED_COLLECTIONS: SyncedCollection[] = [
   'memory',
   'events',
   'tasks',
+  'projects',
+  'projectCards',
   'accounts',
   'categories',
   'transactions',
@@ -98,6 +112,10 @@ export function collectionForTombstone(type: Tombstone['type']): string {
       return 'events';
     case 'task':
       return 'tasks';
+    case 'project':
+      return 'projects';
+    case 'projectCard':
+      return 'projectCards';
     case 'account':
       return 'accounts';
     case 'category':
@@ -278,6 +296,72 @@ export function fromRemoteTask(id: string, data: Record<string, unknown>): Plann
     onceDate,
     time: validTime(data.time),
     done: normalizeDoneDates(data.done),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+/**
+ * Проект в облако. Карточки едут отдельными документами: перенос одной
+ * карточки не перезаписывает весь проект.
+ */
+export function toRemoteProject(project: Project): Record<string, unknown> {
+  return {
+    title: project.title,
+    goal: project.goal,
+    notes: project.notes,
+    status: project.status,
+    dueDate: project.dueDate,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function fromRemoteProject(id: string, data: Record<string, unknown>): Project {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    title: text(data.title, PROJECT_MAX_TITLE),
+    goal: text(data.goal, PROJECT_MAX_TITLE),
+    notes: text(data.notes, PROJECT_MAX_NOTES),
+    status: data.status === 'paused' || data.status === 'done' ? data.status : 'active',
+    dueDate: validDate(data.dueDate),
+    createdAt: Number(data.createdAt ?? updatedAt),
+    updatedAt,
+    dirty: 0
+  };
+}
+
+/**
+ * Карточка в облако. `column` и `order` обязательны: по ним строится доска.
+ * `projectId` — ссылка на проект, как `topicId` у плана.
+ */
+export function toRemoteProjectCard(card: ProjectCard): Record<string, unknown> {
+  return {
+    projectId: card.projectId,
+    title: card.title,
+    notes: card.notes,
+    column: normalizeColumn(card.column),
+    order: normalizeOrder(card.order),
+    dueDate: card.dueDate,
+    createdAt: card.createdAt,
+    updatedAt: card.updatedAt,
+    schemaVersion: CLOUD_SCHEMA_VERSION
+  };
+}
+
+export function fromRemoteProjectCard(id: string, data: Record<string, unknown>): ProjectCard {
+  const updatedAt = pickUpdatedAt(data);
+  return {
+    id,
+    projectId: text(data.projectId),
+    title: text(data.title, CARD_MAX_TITLE),
+    notes: text(data.notes, CARD_MAX_NOTES),
+    column: normalizeColumn(data.column),
+    order: normalizeOrder(data.order),
+    dueDate: validDate(data.dueDate),
     createdAt: Number(data.createdAt ?? updatedAt),
     updatedAt,
     dirty: 0

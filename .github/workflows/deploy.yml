@@ -62,6 +62,9 @@ jobs:
       - name: Task tests
         run: npm run test:tasks
 
+      - name: Project board tests
+        run: npm run test:projects
+
       - name: Budget tests
         run: npm run test:budget
 
