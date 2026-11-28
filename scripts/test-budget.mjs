@@ -423,3 +423,232 @@ check(
   'obligationsMonthlyTotal: сумма месячных эквивалентов'
 );
 
+
+/* ---------- денежные действия помощника ---------- */
+
+const moneyActions = await load('src/lib/api/budget-actions.ts');
+const moneyTool = await load('src/lib/api/budget-tools.ts');
+const promptBuilder = await load('src/lib/api/prompts.ts');
+
+const { applyBudgetActions, describeBudgetActions, normalizeBudgetAction } = moneyActions;
+
+const stamp = { createdAt: 0, updatedAt: 0, dirty: 1 };
+const testAccounts = [
+  { id: 'acc-card', title: 'Карта', kind: 'card', openingBalance: 1000000, includeInFree: true, archived: false, order: 0, notes: '', ...stamp },
+  { id: 'acc-save', title: 'Копилка', kind: 'savings', openingBalance: 5000000, includeInFree: false, archived: false, order: 1, notes: '', ...stamp },
+  { id: 'acc-old', title: 'Старая карта', kind: 'card', openingBalance: 0, includeInFree: true, archived: true, order: 2, notes: '', ...stamp }
+];
+const testCategories = [
+  { id: 'exp:food', title: 'Продукты', kind: 'expense', group: 'needs', essential: true, icon: '🛒', archived: false, order: 1, ...stamp },
+  { id: 'inc:salary', title: 'Зарплата', kind: 'income', group: 'needs', essential: false, icon: '💼', archived: false, order: 2, ...stamp }
+];
+const testObligations = [
+  {
+    id: 'obl-rent',
+    title: 'Аренда',
+    kind: 'bill',
+    amount: 3500000,
+    frequency: 'monthly',
+    dueDay: 5,
+    dueDate: '',
+    active: true,
+    remind: true,
+    categoryId: 'exp:food',
+    accountId: 'acc-card',
+    assetId: 'ast-debt',
+    notes: '',
+    ...stamp
+  },
+  {
+    id: 'obl-old',
+    title: 'Старая подписка',
+    kind: 'subscription',
+    amount: 99000,
+    frequency: 'monthly',
+    dueDay: 10,
+    dueDate: '',
+    active: false,
+    remind: false,
+    categoryId: '',
+    accountId: 'acc-card',
+    assetId: '',
+    notes: '',
+    ...stamp
+  }
+];
+const testAssets = [
+  { id: 'ast-debt', title: 'Долг', kind: 'liability', assetClass: 'loan', value: 10000000, ratePercent: 0, notes: '', ...stamp }
+];
+const testState = {
+  accounts: testAccounts,
+  categories: testCategories,
+  obligations: testObligations,
+  assets: testAssets
+};
+
+let txSeq = 0;
+const applyMoney = (actions) =>
+  applyBudgetActions(actions, testState, {
+    today: '2026-11-28',
+    now: 1000,
+    newId: () => `tx-${++txSeq}`
+  });
+
+check(
+  normalizeBudgetAction({ type: 'transaction.expense', amount: 500, accountId: 'acc-card' }).amount === 50000,
+  'деньги: рубли модели превращаются в копейки'
+);
+check(
+  normalizeBudgetAction({ type: 'transaction.expense', accountId: 'acc-card' }) === null,
+  'деньги: без суммы действие отбрасывается'
+);
+check(
+  normalizeBudgetAction({ type: 'transaction.expense', amount: 500 }) === null,
+  'деньги: без счёта действие отбрасывается'
+);
+check(
+  normalizeBudgetAction({ type: 'transaction.transfer', amount: 100, accountId: 'acc-card', toAccountId: 'acc-card' }) === null,
+  'деньги: перевод сам в себя отбрасывается'
+);
+check(normalizeBudgetAction({ type: 'obligation.pay' }) === null, 'деньги: оплата без id отбрасывается');
+check(normalizeBudgetAction({ type: 'savings.topup', amount: 100 }) === null, 'деньги: неизвестный тип отбрасывается');
+check(
+  normalizeBudgetAction({ type: 'transaction.expense', amount: 100, accountId: 'acc-card', date: '2026-02-30' }, '2026-11-28').date === '2026-11-28',
+  'деньги: битая дата — это сегодня'
+);
+
+const expense = applyMoney([
+  { type: 'transaction.expense', amount: 500, accountId: 'acc-card', categoryId: 'exp:food', payee: 'Пятёрочка' }
+]);
+const expenseRow = expense.changes.transactions.put[0];
+check(
+  expense.applied.length === 1 && expenseRow.type === 'expense' && expenseRow.amount === 50000,
+  'деньги: расход записан в копейках'
+);
+check(
+  expenseRow.date === '2026-11-28' && expenseRow.categoryId === 'exp:food' && expenseRow.payee === 'Пятёрочка',
+  'деньги: дата, категория и получатель расхода'
+);
+check(expense.changes.assets.put.length === 0, 'деньги: расход не трогает активы');
+check(expense.undo.transactions.remove[0] === expenseRow.id, 'деньги: откат удаляет созданный расход');
+const expenseLabel = describeBudgetActions(
+  [{ type: 'transaction.expense', amount: 500, accountId: 'acc-card', categoryId: 'exp:food' }],
+  testState,
+  '2026-11-28'
+)[0];
+check(
+  expenseLabel.includes('расход') && expenseLabel.includes('Продукты') && expenseLabel.includes('Карта'),
+  'деньги: подпись расхода называет категорию и счёт'
+);
+
+const transfer = applyMoney([
+  { type: 'transaction.transfer', amount: 700, accountId: 'acc-card', toAccountId: 'acc-save', categoryId: 'exp:food' }
+]);
+const transferRow = transfer.changes.transactions.put[0];
+check(
+  transferRow.type === 'transfer' && transferRow.categoryId === '' && transferRow.toAccountId === 'acc-save',
+  'деньги: перевод без категории, между счетами'
+);
+check(
+  describeBudgetActions(
+    [{ type: 'transaction.transfer', amount: 700, accountId: 'acc-card', toAccountId: 'acc-save' }],
+    testState,
+    '2026-11-28'
+  )[0].includes('Копилка'),
+  'деньги: подпись перевода называет счёт получателя'
+);
+
+const pay = applyMoney([{ type: 'obligation.pay', id: 'obl-rent' }]);
+const payRow = pay.changes.transactions.put[0];
+check(
+  payRow.type === 'expense' && payRow.amount === 3500000 && payRow.obligationId === 'obl-rent',
+  'деньги: оплата платежа — расход со ссылкой на платёж'
+);
+check(
+  pay.changes.assets.put.length === 1 && pay.changes.assets.put[0].value === 6500000,
+  'деньги: оплата уменьшает остаток долга'
+);
+check(
+  pay.undo.assets.put[0] && pay.undo.assets.put[0].value === 10000000,
+  'деньги: откат возвращает прежний долг'
+);
+check(
+  describeBudgetActions([{ type: 'obligation.pay', id: 'obl-rent' }], testState, '2026-11-28')[0].includes('Аренда'),
+  'деньги: подпись оплаты называет платёж'
+);
+
+check(
+  applyMoney([{ type: 'transaction.expense', amount: 100, accountId: 'acc-old', categoryId: 'exp:food' }]).applied.length === 0,
+  'деньги: на архивный счёт не пишем'
+);
+check(
+  applyMoney([{ type: 'transaction.expense', amount: 100, accountId: 'acc-card', categoryId: 'exp:nope' }]).skipped.length === 1,
+  'деньги: неизвестная категория — пропуск с причиной'
+);
+check(
+  applyMoney([{ type: 'transaction.expense', amount: 100, accountId: 'acc-card', categoryId: 'exp:nope' }]).changes.transactions.put.length === 0,
+  'деньги: с неизвестной категорией операция не создаётся'
+);
+check(
+  applyMoney([{ type: 'transaction.transfer', amount: 100, accountId: 'acc-card', toAccountId: 'acc-old' }]).applied.length === 0,
+  'деньги: перевод на архивный счёт не проходит'
+);
+check(applyMoney([{ type: 'obligation.pay', id: 'obl-old' }]).applied.length === 0, 'деньги: архивный платёж не оплачиваем');
+check(applyMoney([{ type: 'obligation.pay', id: 'obl-nope' }]).skipped.length === 1, 'деньги: неизвестный платёж — пропуск');
+
+const many = applyMoney(
+  Array.from({ length: 6 }, () => ({ type: 'transaction.expense', amount: 10, accountId: 'acc-card' }))
+);
+check(many.applied.length === 4 && many.skipped.length === 1, 'деньги: не больше четырёх действий за ответ');
+
+check(moneyTool.BUDGET_ACTIONS_TOOL.function.name === 'budget_actions', 'деньги: имя инструмента стабильно');
+check(
+  moneyTool.BUDGET_ACTIONS_TOOL.function.parameters.properties.actions.maxItems === 4,
+  'деньги: схема инструмента ограничивает четырьмя действиями'
+);
+check(
+  moneyTool.BUDGET_ACTIONS_TOOL.function.parameters.properties.actions.items.properties.type.enum.length === 4,
+  'деньги: в схеме ровно четыре типа действий'
+);
+
+/* ---------- бюджет в промпте помощника ---------- */
+
+const promptBudget = promptBuilder.buildBudgetPrompt(
+  {
+    accounts: testAccounts,
+    categories: testCategories,
+    obligations: testObligations,
+    transactions: [{ date: '2026-11-20', type: 'expense', amount: 100000, accountId: 'acc-card' }]
+  },
+  { today: '2026-11-28' }
+);
+check(promptBudget.accounts.length === 2, 'промпт: архивные счета скрыты');
+check(promptBudget.accounts[0].id === 'acc-save', 'промпт: счета по убыванию остатка');
+check(
+  promptBudget.accounts.find((item) => item.id === 'acc-card').balance === 900000,
+  'промпт: остаток счёта считается по операциям'
+);
+check(
+  promptBudget.obligations.length === 1 && promptBudget.obligations[0].date === '2026-12-05',
+  'промпт: только активные платежи в окне'
+);
+
+const plannerNow = new Date('2026-11-28T10:00:00');
+const calendarCtx = promptBuilder.buildPlannerContext([], plannerNow);
+const budgetSystem = promptBuilder.plannerAssistantSystem({ ...calendarCtx, budget: promptBudget });
+check(budgetSystem.includes('budget_actions'), 'промпт: денежный инструмент назван');
+check(budgetSystem.includes('id: acc-card') && budgetSystem.includes('id: exp:food'), 'промпт: id счетов и категорий');
+check(budgetSystem.includes('id: obl-rent'), 'промпт: id платежа для оплаты');
+check(budgetSystem.includes('Не больше 4 денежных действий'), 'промпт: лимит денежных действий');
+check(budgetSystem.includes('Суммы не выдумывай'), 'промпт: запрет придумывать суммы');
+check(
+  !promptBuilder.plannerAssistantSystem(calendarCtx).includes('budget_actions'),
+  'промпт: без бюджета денег не обещаем'
+);
+
+if (failures.length > 0) {
+  console.error(`\nПровалено проверок: ${failures.length} из ${total}`);
+  process.exit(1);
+}
+console.log(`\nВсе проверки бюджета пройдены (${total}).`);
+

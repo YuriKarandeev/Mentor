@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { plannerTurn } from '../api/agent';
   import { ApiError } from '../api/deepseek';
   import {
@@ -7,8 +8,25 @@
     type EventChangeSet,
     type TaskChangeSet
   } from '../api/planner-actions';
-  import { buildPlannerContext } from '../api/prompts';
-  import { allEvents, allTasks, applyPlannerChanges } from '../db/db';
+  import {
+    applyBudgetActions,
+    describeBudgetActions,
+    type AssetChangeSet,
+    type TransactionChangeSet
+  } from '../api/budget-actions';
+  import { buildBudgetPrompt, buildPlannerContext } from '../api/prompts';
+  import {
+    allAccounts,
+    allAssets,
+    allCategories,
+    allEvents,
+    allObligations,
+    allTasks,
+    allTransactions,
+    applyBudgetChanges,
+    applyPlannerChanges,
+    ensureBudgetDefaults
+  } from '../db/db';
   import { router } from '../router.svelte';
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toast.svelte';
@@ -23,8 +41,13 @@
     actions?: string[];
     /** Что пропущено: несуществующий id, битая дата, лимит действий. */
     skipped?: string[];
-    /** Обратные операции для кнопки «Отменить». */
-    undo?: { events: EventChangeSet; tasks: TaskChangeSet };
+    /** Обратные операции для кнопки «Отменить» — календарь и деньги вместе. */
+    undo?: {
+      events: EventChangeSet;
+      tasks: TaskChangeSet;
+      transactions: TransactionChangeSet;
+      assets: AssetChangeSet;
+    };
     undone?: boolean;
     error?: string;
   }
@@ -33,7 +56,8 @@
     'Что у меня на этой неделе?',
     'Поставь на завтра в 18:00 занятие по SQL',
     'Добавь дело «зарядка» каждый день в 8:00',
-    'Отметь, что я сделал зарядку'
+    'Запиши расход 500 ₽ на продукты',
+    'Сколько у меня на карте?'
   ];
 
   let messages = $state<ChatNote[]>([]);
@@ -41,6 +65,14 @@
   let thread = $state<HTMLDivElement | null>(null);
   let abort: AbortController | null = null;
   let seq = 0;
+
+  /** Счетов нет — записывать траты некуда: подскажем до первого запроса. */
+  let noAccounts = $state(false);
+
+  onMount(async () => {
+    await ensureBudgetDefaults();
+    noAccounts = (await allAccounts()).every((account) => account.archived);
+  });
 
   const nextId = (): string => `m${++seq}`;
 
@@ -70,41 +102,74 @@
     abort = new AbortController();
 
     try {
-      const [events, tasks] = await Promise.all([allEvents(), allTasks()]);
+      const [events, tasks, accounts, categories, obligations, transactions, assets] =
+        await Promise.all([
+          allEvents(),
+          allTasks(),
+          allAccounts(),
+          allCategories(),
+          allObligations(),
+          allTransactions(),
+          allAssets()
+        ]);
       const result = await plannerTurn({
         settings: settings.data,
-        context: buildPlannerContext({ events, tasks }),
+        context: {
+          ...buildPlannerContext({ events, tasks }),
+          budget: buildBudgetPrompt({ accounts, categories, obligations, transactions })
+        },
         history,
         signal: abort.signal
       });
 
       const plan = applyPlannerActions(result.actions, { events, tasks });
-      const { changes } = plan;
+      const money = applyBudgetActions(result.moneyActions, {
+        accounts,
+        categories,
+        obligations,
+        assets
+      });
+
+      const plannerChanges = plan.changes;
+      const moneyChanges = money.changes;
       const touched =
-        changes.events.put.length +
-        changes.events.remove.length +
-        changes.tasks.put.length +
-        changes.tasks.remove.length;
-      if (touched > 0) await applyPlannerChanges(changes);
+        plannerChanges.events.put.length +
+        plannerChanges.events.remove.length +
+        plannerChanges.tasks.put.length +
+        plannerChanges.tasks.remove.length +
+        moneyChanges.transactions.put.length +
+        moneyChanges.transactions.remove.length +
+        moneyChanges.assets.put.length;
+      if (plan.applied.length > 0) await applyPlannerChanges(plannerChanges);
+      if (money.applied.length > 0) await applyBudgetChanges(moneyChanges);
+
+      const applied = plan.applied.length + money.applied.length;
+      const skipped = [...plan.skipped, ...money.skipped];
+      const labels = [
+        ...describePlannerActions(result.actions, { events, tasks }),
+        ...describeBudgetActions(result.moneyActions, { accounts, categories, obligations, assets })
+      ];
 
       const note: ChatNote = {
         id: nextId(),
         role: 'assistant',
         text: result.reply,
-        actions:
-          plan.applied.length > 0
-            ? describePlannerActions(result.actions, { events, tasks })
+        actions: applied > 0 ? labels : undefined,
+        skipped: skipped.length > 0 ? skipped : undefined,
+        undo:
+          applied > 0
+            ? {
+                events: plan.undo.events,
+                tasks: plan.undo.tasks,
+                transactions: money.undo.transactions,
+                assets: money.undo.assets
+              }
             : undefined,
-        skipped: plan.skipped.length > 0 ? plan.skipped : undefined,
-        undo: plan.applied.length > 0 ? plan.undo : undefined,
         error: result.error
       };
       messages = [...messages, note];
 
-      if (plan.applied.length > 0) {
-        const count = plan.applied.length;
-        toasts.success(`Записано изменений: ${count}`);
-      }
+      if (applied > 0) toasts.success(`Записано изменений: ${touched}`);
     } catch (e) {
       const message =
         (e as Error)?.name === 'AbortError'
@@ -131,7 +196,11 @@
   async function undo(note: ChatNote): Promise<void> {
     if (!note.undo || note.undone) return;
     try {
-      await applyPlannerChanges(note.undo);
+      await applyPlannerChanges({ events: note.undo.events, tasks: note.undo.tasks });
+      await applyBudgetChanges({
+        transactions: note.undo.transactions,
+        assets: note.undo.assets
+      });
       messages = messages.map((m) => (m.id === note.id ? { ...m, undone: true } : m));
       toasts.success('Изменения отменены');
     } catch (e) {
@@ -143,18 +212,28 @@
 <div class="page">
   <header class="page-head">
     <div>
-      <h1>Помощник календаря и дел</h1>
+      <h1>Помощник календаря, дел и бюджета</h1>
       <p class="muted small">
-        Спросите словами — события и дела появятся в календаре. Любую пачку изменений можно отменить.
+        Спросите словами — события, дела и траты появятся в приложении. Любую пачку изменений можно отменить.
       </p>
     </div>
-    <button class="btn btn-sm" onclick={() => router.go('/calendar')}>Открыть календарь</button>
+    <div class="row wrap">
+      <button class="btn btn-sm" onclick={() => router.go('/calendar')}>Календарь</button>
+      <button class="btn btn-sm" onclick={() => router.go('/budget')}>Бюджет</button>
+    </div>
   </header>
 
   {#if !configured}
     <div class="card setup">
       Подключение к DeepSeek не настроено — помощник не сможет ответить.
       <button class="btn btn-sm btn-primary" onclick={() => router.go('/settings')}>Настроить</button>
+    </div>
+  {/if}
+
+  {#if noAccounts}
+    <div class="card setup">
+      Записывать траты некуда: в бюджете нет ни одного счёта.
+      <button class="btn btn-sm" onclick={() => router.go('/budget')}>Открыть бюджет</button>
     </div>
   {/if}
 
@@ -225,7 +304,7 @@
         placeholder="Например: поставь на завтра созвон в 10:00"
       />
       <p class="mute tiny hint">
-        Помощник видит ближайшие 14 дней, события и дела с повтором — и меняет только их.
+        Помощник видит ближайшие 14 дней, события, дела с повтором, счета и платежи — и меняет только их.
       </p>
     </div>
   </div>

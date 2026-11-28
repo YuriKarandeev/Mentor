@@ -25,6 +25,7 @@ import {
   type PlanArgs
 } from './tools';
 import { PLANNER_ACTIONS_TOOL, parsePlannerArgs } from './planner-tools';
+import { BUDGET_ACTIONS_TOOL } from './budget-tools';
 import type { AppSettings, Effort, Plan, PlanItem, PlanModule, Profile, Topic } from '../db/db';
 import type { ApiMessage, Usage } from './types';
 import { requestVariants, type RequestBody } from './request-variants';
@@ -264,8 +265,10 @@ export interface PlannerTurnOptions {
 export interface PlannerTurnResult {
   /** Текст для пользователя: из инструмента либо обычный ответ модели. */
   reply: string;
-  /** Сырые действия — их разбирает `applyPlannerActions`. */
+  /** Сырые действия календаря и дел — их разбирает `applyPlannerActions`. */
   actions: unknown[];
+  /** Сырые денежные действия — их разбирает `applyBudgetActions`. */
+  moneyActions: unknown[];
   /** Модель ответила текстом без вызова инструмента. */
   plain: boolean;
   /** Ошибка разбора аргументов: показываем, но ответ не теряем. */
@@ -281,43 +284,61 @@ export function plannerMessages(
 }
 
 /**
- * Один ход помощника календаря. Используем `chatOnce`, а не стрим: действия
- * приходят аргументами инструмента, и до полного JSON применять их нельзя —
- * частично полученный `event.create` дал бы событие с обрезанным названием.
+ * Один ход помощника. Используем `chatOnce`, а не стрим: действия приходят
+ * аргументами инструмента, а частично полученный `event.create` или
+ * `transaction.expense` дал бы запись с обрезанным названием или суммой.
+ *
+ * Инструментов два — `planner_actions` для календаря и `budget_actions` для
+ * денег: модель может вызвать оба в одном ответе, поэтому разбираем каждый
+ * вызов отдельно, а общий текст берём из первого непустого.
  */
 export async function plannerTurn(opts: PlannerTurnOptions): Promise<PlannerTurnResult> {
   const body: Record<string, unknown> = {
     model: opts.settings.model,
     messages: plannerMessages(opts.context, opts.history),
     ...thinkingBlock(opts.settings),
-    tools: mergeTools(opts.settings, [PLANNER_ACTIONS_TOOL]),
+    tools: mergeTools(opts.settings, [PLANNER_ACTIONS_TOOL, BUDGET_ACTIONS_TOOL]),
     max_tokens: 2048
   };
 
   const res = await withFallback(body, (variant) => chatOnce(connFrom(opts.settings), variant, opts.signal));
-  const call = res.toolCalls.find((t) => t.function?.name === 'planner_actions');
+  const plannerCall = res.toolCalls.find((t) => t.function?.name === 'planner_actions');
+  const moneyCall = res.toolCalls.find((t) => t.function?.name === 'budget_actions');
 
-  if (!call) {
+  if (!plannerCall && !moneyCall) {
     const reply = res.content.trim();
     if (!reply) throw new ApiError(0, 'Модель ничего не ответила. Повторите запрос.');
-    return { reply, actions: [], plain: true, usage: res.usage };
+    return { reply, actions: [], moneyActions: [], plain: true, usage: res.usage };
   }
 
-  const parsed = parsePlannerArgs(call.function.arguments);
-  if (!parsed.ok) {
+  const plannerParsed = plannerCall ? parsePlannerArgs(plannerCall.function.arguments) : null;
+  const moneyParsed = moneyCall ? parsePlannerArgs(moneyCall.function.arguments) : null;
+  const errors = [plannerParsed, moneyParsed]
+    .map((parsed) => (parsed && !parsed.ok ? parsed.error : ''))
+    .filter(Boolean);
+
+  const reply =
+    (plannerParsed?.ok ? plannerParsed.value.reply : '') ||
+    (moneyParsed?.ok ? moneyParsed.value.reply : '') ||
+    res.content.trim();
+
+  if (!reply) {
     return {
-      reply: res.content.trim() || 'Не удалось разобрать действия — попробуйте переформулировать.',
+      reply: 'Не удалось разобрать действия — попробуйте переформулировать.',
       actions: [],
+      moneyActions: [],
       plain: true,
-      error: parsed.error,
+      error: errors.join('; ') || undefined,
       usage: res.usage
     };
   }
 
   return {
-    reply: parsed.value.reply || res.content.trim(),
-    actions: parsed.value.actions,
+    reply,
+    actions: plannerParsed?.ok ? plannerParsed.value.actions : [],
+    moneyActions: moneyParsed?.ok ? moneyParsed.value.actions : [],
     plain: false,
+    error: errors.length > 0 ? errors.join('; ') : undefined,
     usage: res.usage
   };
 }

@@ -972,6 +972,74 @@ export async function applyPlannerChanges(changes: {
 
 /* -------------------------------------------------------------------- бюджет */
 
+export interface TransactionChanges {
+  put: BudgetTransaction[];
+  remove: string[];
+  /** id, у которых нужно снять надгробие (отмена удаления). */
+  restore?: string[];
+}
+
+export interface AssetChanges {
+  put: BudgetAsset[];
+  remove: string[];
+  restore?: string[];
+}
+
+/**
+ * Пачка денежных изменений от помощника или кнопки «Отменить»: операции и
+ * активы пишутся одной транзакцией. Остатки счетов не хранятся, поэтому
+ * операция сама меняет баланс, а пассив (долг) правится записью в `assets`.
+ */
+export async function applyBudgetChanges(changes: {
+  transactions?: TransactionChanges;
+  assets?: AssetChanges;
+}): Promise<void> {
+  const ts = now();
+  const transactions = changes.transactions;
+  const assets = changes.assets;
+  await db.transaction('rw', [db.transactions, db.assets, db.tombstones], async () => {
+    if (transactions && transactions.put.length > 0) {
+      await db.transactions.bulkPut(
+        transactions.put.map((row) =>
+          toPlainValue({
+            ...row,
+            updatedAt: Math.max(row.updatedAt, ts),
+            dirty: 1
+          })
+        )
+      );
+    }
+    if (transactions && transactions.remove.length > 0) {
+      await db.transactions.bulkDelete(transactions.remove);
+      await db.tombstones.bulkPut(
+        transactions.remove.map((id) => tombstoneOf('transaction', id, ts))
+      );
+    }
+    if (transactions?.restore && transactions.restore.length > 0) {
+      await db.tombstones.bulkDelete(transactions.restore.map((id) => `transaction:${id}`));
+    }
+    if (assets && assets.put.length > 0) {
+      await db.assets.bulkPut(
+        assets.put.map((row) =>
+          toPlainValue({
+            ...row,
+            updatedAt: Math.max(row.updatedAt, ts),
+            dirty: 1
+          })
+        )
+      );
+    }
+    if (assets && assets.remove.length > 0) {
+      await db.assets.bulkDelete(assets.remove);
+      await db.tombstones.bulkPut(assets.remove.map((id) => tombstoneOf('asset', id, ts)));
+    }
+    if (assets?.restore && assets.restore.length > 0) {
+      await db.tombstones.bulkDelete(assets.restore.map((id) => `asset:${id}`));
+    }
+  });
+  notifyLocalChange();
+}
+
 /**
  * Стартовый справочник категорий. Вызывается при открытии раздела «Бюджет»:
  * на новой базе таблица пустая, на старой — заполняется один раз.

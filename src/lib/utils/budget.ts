@@ -107,6 +107,8 @@ export const BUDGET_MAX_PAYEE = 80;
 export const BUDGET_MAX_NOTES = 400;
 /** Сколько строк конвертов храним в месяце: защита от случайной простыни. */
 export const BUDGET_MAX_LINES = 60;
+/** Сколько денежных действий модель может сделать за один ответ. */
+export const BUDGET_MAX_ACTIONS = 4;
 
 function pick<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
   const raw = text(value).toLowerCase();
